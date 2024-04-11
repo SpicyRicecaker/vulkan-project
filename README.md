@@ -14,3 +14,7 @@ brew install glfw glm
 mkdir build && cd build # in root dir
 cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1 .. && make -j && ./vulkan_project
 ```
+
+## Compiling & Running (Windows)
+
+Install `vcpkg`.
