@@ -33,6 +33,7 @@ public:
   VkDebugUtilsMessengerEXT debug_messenger;
   VkPhysicalDevice physical_device;
   VkSurfaceKHR surface;
+  VkDevice device;
   void run() {
     init_window();
     init_vulkan();
@@ -287,6 +288,17 @@ private:
       cout << surface_format.surfaceFormat.colorSpace << endl;
     }
   }
+  
+  void create_device() {
+    VkDeviceCreateInfo device_create_info = {
+      .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .queueCreateInfoCount = 1,
+      
+      
+    };
+    
+    vkCreateDevice(physical_device, &device_create_info, nullptr, &device);
+  }
 
   void create_surface() {
     if (glfwCreateWindowSurface(instance, window, nullptr, &surface) !=
@@ -294,13 +306,25 @@ private:
       throw runtime_error("unable to create surface");
     };
   }
+  
+  void create_render_pass() {
+    // vkCreateRenderPass2(VkDevice device, const VkRenderPassCreateInfo2 *pCreateInfo, const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass)
+  }
 
+  void create_pipeline() {
+    
+  }
+  
   void init_vulkan() {
     // dbg_get_available_extensions();
     create_instance();
     setup_debug_messenger();
     choose_physical_device();
     create_surface();
+    
+    create_render_pass();
+    create_pipeline();
+    
     // dbg_get_surface_output_formats();
   }
   void main_loop() {
