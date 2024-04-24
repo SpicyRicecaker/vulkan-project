@@ -366,8 +366,14 @@ private:
   }
 
   void create_render_pass() {
+    
     VkRenderPassCreateInfo2 render_pass_info = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2,
+      .attachmentCount = 1,
+      // WIP
+      .pAttachments = nullptr,
+      .subpassCount = 1,
+      .pSubpasses = nullptr,
     };
     // vkCreateRenderPass2(
     //   device, const VkRenderPassCreateInfo2 *pCreateInfo,
