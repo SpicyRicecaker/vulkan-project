@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <optional>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -33,6 +34,9 @@ const char* os = "macos";
 const char* os = "windows";
 #endif
 
+const vector<const char*> wanted_device_extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+
+
 class App {
 public:
   GLFWwindow* window;
@@ -41,6 +45,7 @@ public:
   VkPhysicalDevice physical_device;
   VkSurfaceKHR surface;
   VkDevice device;
+  VkRenderPass render_pass;
   void run() {
     init_window();
     init_vulkan();
@@ -132,7 +137,7 @@ private:
     //      << endl;
 
     vector<const char*> extensions;
-    for (int i = 0; i < extensions_count; i++) {
+    for (unsigned int i = 0; i < extensions_count; i++) {
       extensions.emplace_back(t_extensions[i]);
     }
     // add the khr 2 extension
@@ -161,7 +166,7 @@ private:
                                .engineVersion = VK_MAKE_VERSION(0, 1, 0),
                                .apiVersion = VK_API_VERSION_1_3 };
 
-    // get required textensions
+    // get required extensions
     auto extensions = get_required_extensions();
 
     VkInstanceCreateInfo create_info{
@@ -301,7 +306,15 @@ private:
     }
   }
 
-  void create_device() {
+  struct QueueFamilyIndex {
+    std::optional<u32> draw_and_present_family;
+
+    bool isComplete() {
+      return draw_and_present_family.has_value();
+    };
+  };
+
+  QueueFamilyIndex find_queue_family_index() {
     // get queue device capabilities from physical device??
     u32 queue_family_property_count;
     vkGetPhysicalDeviceQueueFamilyProperties(
@@ -312,24 +325,68 @@ private:
       &queue_family_property_count,
       queue_family_properties.data());
 
-    auto best_queue_count = 0;
-    u32 best_queue_family_index = 0;
+    std::optional<u32> draw_and_present_family;
 
-    for (u32 i = 0; i < queue_family_property_count; i++) {
-      if (queue_family_properties[i].queueCount > best_queue_count) {
-        best_queue_family_index = i;
-        best_queue_count = queue_family_properties[i].queueCount;
+    int i = 0;
+    for (auto& p : queue_family_properties) {
+      if ((p.queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
+        VkBool32 present_support = false;
+        vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, i, surface, &present_support);
+        if (present_support) {
+          draw_and_present_family = i;
+          break;
+        }
+      }
+      i++;
+    }
+    return QueueFamilyIndex{
+      .draw_and_present_family = draw_and_present_family
+    };
+  }
+
+  bool device_includes_extensions() {
+    u32 device_property_count = 0;
+    vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &device_property_count, nullptr);
+    std::vector<VkExtensionProperties> device_extensions(device_property_count);
+    vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &device_property_count, device_extensions.data());
+
+    bool includes = false;
+    for (auto& wde : wanted_device_extensions) {
+      for (auto& de : device_extensions) {
+        if (strcmp(de.extensionName, wde) == 0) {
+          includes = true;
+          break;
+        }
       }
     }
+    return includes;
+  }
+
+  bool is_device_suitable() {
+    QueueFamilyIndex queue_family_index = find_queue_family_index();
+
+    bool swapchain_support = false;
+
+    // Check if device supports swapchain extension
+    return queue_family_index.isComplete() && device_includes_extensions();
+  }
+
+  void create_logical_device() {
+    if (!is_device_suitable()) {
+      throw runtime_error("device not suitable for various reasons");
+    }
+
+    QueueFamilyIndex queue_family_index = find_queue_family_index();
 
     // only need 1 device for gaming lol
     vector<float> queue_priorities = { 1.0 };
 
     VkDeviceQueueCreateInfo device_queue_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = best_queue_family_index,
+        .queueFamilyIndex = queue_family_index.draw_and_present_family.value(),
         .queueCount = 1,
-        .pQueuePriorities = queue_priorities.data() };
+        .pQueuePriorities = queue_priorities.data()
+    };
 
     vector<VkDeviceQueueCreateInfo> device_queue_create_infos = {
         device_queue_create_info };
@@ -342,6 +399,12 @@ private:
     if (os == "APPLE") {
       extensions.emplace_back("VK_KHR_portability_subset");
     }
+
+    // also put wanted device extensions here
+    for (auto e : wanted_device_extensions) {
+      extensions.emplace_back(e);
+    }
+
     vector<const char*> validation_layers = { "VK_LAYER_KHRONOS_validation" };
     if (enableValidationLayers && !layers_exists(&validation_layers)) {
       throw runtime_error("validation layers requested but validation layer "
@@ -365,7 +428,7 @@ private:
 
     // queues can be requested later based on the logical device
     VkQueue queue;
-    vkGetDeviceQueue(device, best_queue_family_index, 0, &queue);
+    vkGetDeviceQueue(device, queue_family_index.draw_and_present_family.value(), 0, &queue);
   }
 
   void create_surface() {
@@ -375,7 +438,14 @@ private:
     };
   }
 
+  struct SwapChainSupportDetails {
+    VkSurfaceCapabilitiesKHR capabilities;
+    std::vector<VkSurfaceFormatKHR> formats;
+    std::vector<VkPresentModeKHR> presentModes;
+  };
+
   void create_swapchain() {
+    // vkEnumerateDeviceExtensionProperties
     // vkCreateSwapchainKHR(device);
   }
 
@@ -389,9 +459,8 @@ private:
       .subpassCount = 1,
       .pSubpasses = nullptr,
     };
-    // vkCreateRenderPass2(
-    //   device, const VkRenderPassCreateInfo2 *pCreateInfo,
-    //     const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass)
+
+    vkCreateRenderPass2(device, &render_pass_info, nullptr, &render_pass);
   }
 
   void create_pipeline() {}
@@ -404,10 +473,11 @@ private:
     create_surface();
 
     // and the queue as well
-    create_device();
-    // create_swapchain();
+    create_logical_device();
+    create_swapchain();
+    // create_framebuffer();
 
-    // create_render_pass();
+    create_render_pass();
     // create_pipeline();
 
     // dbg_get_surface_output_formats();
