@@ -6,10 +6,6 @@ project(vulkan_project)
 
 add_executable(vulkan_project main.cpp)
 
-find_package(Vulkan REQUIRED)
-find_package(glfw3 CONFIG REQUIRED)
-find_package(glm CONFIG REQUIRED)
-
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_BUILD_TYPE Debug)
 
@@ -20,6 +16,18 @@ if(WIN32)
     set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<IF:$<AND:$<C_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:MSVC>>,$<$<CONFIG:Debug,RelWithDebInfo>:EditAndContinue>,$<$<CONFIG:Debug,RelWithDebInfo>:ProgramDatabase>>")
   endif()
 elseif(APPLE)
+  include(CMakePrintHelpers)
+  
+  set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/lib/libvulkan.dylib")
+  set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/include")
+  
+  cmake_print_variables(Vulkan_LIBRARY Vulkan_INCLUDE_DIR)
+  cmake_print_variables(CMAKE_INCLUDE_PATH CMAKE_SYSTEM_INCLUDE_PATH CMAKE_PREFIX_PATH)
 endif()
 
-target_link_libraries(vulkan_project Vulkan::Vulkan glfw glm::glm)
+
+find_package(Vulkan REQUIRED)
+find_package(glfw3 CONFIG REQUIRED)
+find_package(glm CONFIG REQUIRED)
+
+target_link_libraries(vulkan_project Vulkan::Vulkan Vulkan::Headers glfw glm::glm)
