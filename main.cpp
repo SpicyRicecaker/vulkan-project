@@ -483,8 +483,15 @@ class App {
 
     bool format_valid = false;
     for (auto& f : swapchain_support_details.formats) {
+      // cout << "..." << endl;
+      cout << string_VkColorSpaceKHR(f.colorSpace) << endl;
       cout << string_VkFormat(f.format) << endl;
-      // if (f.format == VK_FORMAT_R8G8B8_UNORM && f.color)
+      // cout << "..." << endl;
+      if (f.format == VK_FORMAT_R8G8B8A8_UNORM &&
+          f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+        format_valid = true;
+        break;
+      }
     }
 
     VkSwapchainCreateInfoKHR swapchain_create_info = {
