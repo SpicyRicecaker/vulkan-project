@@ -550,7 +550,6 @@ class App {
                             swapchain_images.data());
     swapchain_image_format = swapchain_create_info.imageFormat;
     swapchain_image_colorspace = swapchain_create_info.imageColorSpace;
-    cout << swapchain_images.size() << endl;
   }
 
   void create_depth_buffer() {
@@ -574,49 +573,74 @@ class App {
   }
 
   void create_render_pass() {
-    VkAttachmentDescription color_attachments[] = {{
-        .format = swapchain_image_format,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-    }};
-    VkAttachmentDescription depth_attachment = {
-        .format = depth_buffer_format,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL};
+    VkAttachmentDescription attachments[] = {
+        // color
+        {
+            .format = swapchain_image_format,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        },
+        // depth
+        {.format = depth_buffer_format,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+         .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         .finalLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}};
 
-    VkSubpassDescription subpass = {
+    VkAttachmentReference attachment_references[] = {
+        // color
+        {.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+        // depth
+        {.attachment = 1, .layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL},
+    };
+
+    VkSubpassDescription subpasses[] = {{
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .inputAttachmentCount = 0,
         .pInputAttachments = nullptr,
         .colorAttachmentCount = 1,
+        .pColorAttachments = &attachment_references[0],
+        .pDepthStencilAttachment = &attachment_references[1],
+    }};
+
+    VkDependencyInfo dependencies[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 2,
+            .pImageMemoryBarriers = nullptr
+
+        },
     };
-    VkSubpassDescription subpasses[] = {subpass};
 
-    VkDependencyInfo dependecy = {
+    VkSubpassDependency subpass_dependencies[] = {{
+        .srcSubpass = 0,
+        .dstSubpass = 0,
+        // ?????????
+        .srcStageMask = VK_ACCESS_NONE,
+        .dstStageMask = VK_ACCESS_NONE,
+        // ?????????
+        .srcAccessMask = VK_ACCESS_NONE,
+        .dstAccessMask = VK_ACCESS_NONE,
+    }};
 
-    };
-    VkDependencyInfo dependencies[] = {dependecy};
-
-    VkRenderPassCreateInfo2 render_pass_info = {
+    VkRenderPassCreateInfo render_pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2,
-        .attachmentCount = 1,
-        .pAttachments = nullptr,
+        .attachmentCount = 2,
+        .pAttachments = &attachments[0],
         .subpassCount = 1,
         .pSubpasses = nullptr,
         .dependencyCount = 1,
         .pDependencies = nullptr};
 
-    vkCreateRenderPass2(device, &render_pass_info, nullptr, &render_pass);
+    vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass);
   }
 
   // void create_image_view() {
