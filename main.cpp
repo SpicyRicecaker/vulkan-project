@@ -499,11 +499,11 @@ class App {
 
     bool format_valid = false;
     for (auto& f : swapchain_support_details.formats) {
-      // cout << "..." << endl;
-      // cout << string_VkColorSpaceKHR(f.colorSpace) << endl;
+      // cout << "[" << endl;
       // cout << string_VkFormat(f.format) << endl;
-      // cout << "..." << endl;
-      if (f.format == VK_FORMAT_R8G8B8A8_UNORM &&
+      // cout << string_VkColorSpaceKHR(f.colorSpace) << endl;
+      // cout << "]" << endl;
+      if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
           f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
         format_valid = true;
         break;
@@ -529,7 +529,7 @@ class App {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = surface,
         .minImageCount = min_image_count,
-        .imageFormat = VK_FORMAT_R8G8B8A8_UNORM,
+        .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
         .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
         .imageExtent = image_extent,
         .imageArrayLayers = 1,

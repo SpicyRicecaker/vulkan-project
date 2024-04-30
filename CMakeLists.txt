@@ -21,8 +21,8 @@ elseif(APPLE)
   set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/lib/libvulkan.dylib")
   set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/include")
   
-  cmake_print_variables(Vulkan_LIBRARY Vulkan_INCLUDE_DIR)
-  cmake_print_variables(CMAKE_INCLUDE_PATH CMAKE_SYSTEM_INCLUDE_PATH CMAKE_PREFIX_PATH)
+  # cmake_print_variables(Vulkan_LIBRARY Vulkan_INCLUDE_DIR)
+  # cmake_print_variables(CMAKE_INCLUDE_PATH CMAKE_SYSTEM_INCLUDE_PATH CMAKE_PREFIX_PATH)
 endif()
 
 
