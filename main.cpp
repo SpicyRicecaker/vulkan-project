@@ -55,6 +55,7 @@ class App {
   VkColorSpaceKHR swapchain_image_colorspace;
   VkImage depth_buffer;
   VkFormat depth_buffer_format;
+  vector<VkPipeline> pipelines;
 
   int window_width;
   int window_height;
@@ -559,14 +560,15 @@ class App {
         .imageType = VK_IMAGE_TYPE_2D,
         .format = depth_buffer_format,
         .extent = {.width = static_cast<u32>(window_width),
-                   .height = static_cast<u32>(window_height)},
+                   .height = static_cast<u32>(window_height),
+                   .depth = static_cast<u32>(1)},
         .mipLevels = 1,
         .arrayLayers = 1,
         .samples = VK_SAMPLE_COUNT_1_BIT,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .initialLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
     vkCreateImage(device, &image_info, nullptr, &depth_buffer);
@@ -593,52 +595,57 @@ class App {
          .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
          .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
          .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-         .finalLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL}};
+         // can't explicitly only use depth without the stencil without a flag
+         .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL}};
 
     VkAttachmentReference attachment_references[] = {
         // color
         {.attachment = 0, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
         // depth
-        {.attachment = 1, .layout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL},
+        {.attachment = 1,
+         .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL},
     };
 
     VkSubpassDescription subpasses[] = {{
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .inputAttachmentCount = 0,
-        .pInputAttachments = nullptr,
+        // .inputAttachmentCount = 0,
+        // .pInputAttachments = nullptr,
         .colorAttachmentCount = 1,
         .pColorAttachments = &attachment_references[0],
         .pDepthStencilAttachment = &attachment_references[1],
     }};
 
     VkDependencyInfo dependencies[] = {
-        {
-            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-            .imageMemoryBarrierCount = 2,
-            .pImageMemoryBarriers = nullptr
+        {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+         .imageMemoryBarrierCount = 2,
+         .pImageMemoryBarriers = nullptr
 
         },
     };
 
     VkSubpassDependency subpass_dependencies[] = {{
-        .srcSubpass = 0,
+        // https://themaister.net/blog/2019/08/14/yet-another-blog-explaining-vulkan-synchronization/
+        // vk_subpass_external transitions the image layout automatically
+        // however, it makes no guarantee on when this transition happens
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
-        // ?????????
-        .srcStageMask = VK_ACCESS_NONE,
-        .dstStageMask = VK_ACCESS_NONE,
-        // ?????????
-        .srcAccessMask = VK_ACCESS_NONE,
-        .dstAccessMask = VK_ACCESS_NONE,
+        // specify that we wait until the color_attachment_output stage until we
+        // make the transition.
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
     }};
 
     VkRenderPassCreateInfo render_pass_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2,
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = 2,
         .pAttachments = &attachments[0],
         .subpassCount = 1,
-        .pSubpasses = nullptr,
+        .pSubpasses = &subpasses[0],
         .dependencyCount = 1,
-        .pDependencies = nullptr};
+        .pDependencies = &subpass_dependencies[0]};
 
     vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass);
   }
@@ -649,7 +656,13 @@ class App {
   //   };
   // }
 
-  void create_pipeline() {}
+  void create_pipeline() {
+    VkGraphicsPipelineCreateInfo pipeline_create_info = {
+      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    };
+    vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info,
+                              nullptr, pipelines.data());
+  }
 
   void init_vulkan() {
     // dbg_get_available_extensions();
@@ -663,8 +676,9 @@ class App {
     create_swapchain();
     // create_image_view();
 
-    // create_render_pass();
-    // create_pipeline();
+    create_depth_buffer();
+    create_render_pass();
+    create_pipeline();
 
     // dbg_get_surface_output_formats();
   }
