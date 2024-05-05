@@ -19,9 +19,19 @@
 #include <vector>
 
 // api for glsl -> spirv conversion
+#include <filesystem>
+#include <format>
+#include <fstream>
 #include <shaderc/shaderc.hpp>
 
+#ifdef __APPLE__
+const char* os = "macos";
+#elif _WIN32
+const char* os = "windows";
+#endif
+
 using namespace std;
+using namespace filesystem;
 
 #define u32 uint32_t
 
@@ -32,12 +42,6 @@ const u32 HEIGHT = 600;
 const bool enableValidationLayers = false;
 #else
 const bool enableValidationLayers = true;
-#endif
-
-#ifdef __APPLE__
-const char* os = "macos";
-#else
-const char* os = "windows";
 #endif
 
 const vector<const char*> wanted_device_extensions = {
@@ -660,21 +664,107 @@ class App {
     };
   }
 
+  path get_current_working_dir() {
+#ifdef _DEBUG
+    return current_path().parent_path().parent_path().parent_path();
+#elif
+    return current_path();
+#endif
+  }
+
+  optional<string> read_to_string(path p) {
+    string output;
+
+    ifstream f;
+    f.open(p);
+    if (f.is_open()) {
+      string line;
+      while (getline(f, line)) {
+        cout << line << endl;
+        output += line;
+      }
+    } else {
+      cerr << "failed to open file" << endl;
+      return {};
+    }
+    return output;
+  }
+
+  // function basically copied from
+  // https://github.com/google/shaderc/blob/main/examples/online-compile/main.cc
+  optional<vector<uint32_t>> get_spirv_from_glsl(const std::string& source,
+                                                 shaderc_shader_kind kind,
+                                                 const std::string& source_path,
+                                                 bool optimize = false) {
+    shaderc::Compiler compiler;
+    shaderc::CompileOptions options;
+
+    if (optimize) {
+      options.SetOptimizationLevel(shaderc_optimization_level_size);
+    }
+
+    shaderc::SpvCompilationResult result =
+        compiler.CompileGlslToSpv(source, kind, source_path.c_str(), options);
+
+    if (result.GetCompilationStatus() == shaderc_compilation_status_success) {
+      // creates a new vector from an "initializer list", which is basically an iterator
+      // costs a copy, wonder if u can do it in place instead?
+      vector<uint32_t> output = {result.cbegin(), result.cend()};
+      return output;
+      // Use the compiled SPIR-V binary (spirv) as needed
+
+    } else {
+      // Handle compilation error
+      std::cerr << result.GetErrorMessage();
+      return {};
+    }
+  }
+
+  optional<VkShaderModule> get_compiled_shader_module(string shader_name) {
+    optional<VkShaderModule> module;
+    // get shader_name from shaders folder
+    path path = get_current_working_dir() / "shaders" / shader_name;
+
+    optional<string> source = read_to_string(path);
+
+    if (!source.has_value()) {
+      return {};
+    }
+
+    VkShaderModuleCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = NULL,
+        .pCode = nullptr};
+
+    // vkCreateShaderModule(device, nullptr, &frag_module);
+    return module;
+  }
+
   void create_pipeline() {
-    VkShaderModule vert_module = VK_NULL_HANDLE;
-    VkShaderModule frag_module = VK_NULL_HANDLE;
+    optional<VkShaderModule> vert_module =
+        get_compiled_shader_module("main.vert");
+    if (!vert_module.has_value()) {
+      throw runtime_error("unable to create vertex shader module");
+    }
+
+    optional<VkShaderModule> frag_module =
+        get_compiled_shader_module("main.frag");
+
+    if (!frag_module.has_value()) {
+      throw runtime_error("unable to create fragment shader module");
+    }
 
     VkPipelineShaderStageCreateInfo shader_stages[] = {
         {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = VK_SHADER_STAGE_VERTEX_BIT,
-            .module = vert_module,
+            .module = vert_module.value(),
             .pName = "Vertex",
         },
         {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-            .module = frag_module,
+            .module = frag_module.value(),
             .pName = "Fragment",
         },
     };
