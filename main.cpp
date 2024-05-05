@@ -18,6 +18,9 @@
 #include <iostream>
 #include <vector>
 
+// api for glsl -> spirv conversion
+#include <shaderc/shaderc.hpp>
+
 using namespace std;
 
 #define u32 uint32_t
@@ -650,16 +653,36 @@ class App {
     vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass);
   }
 
-  // void create_image_view() {
-  //   VkImageViewCreateInfo image_view_info = {
-  //       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-  //   };
-  // }
+  // image views used at runtime during pipeline rendering
+  void create_image_view() {
+    VkImageViewCreateInfo image_view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+    };
+  }
 
   void create_pipeline() {
-    VkGraphicsPipelineCreateInfo pipeline_create_info = {
-      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+    VkShaderModule vert_module = VK_NULL_HANDLE;
+    VkShaderModule frag_module = VK_NULL_HANDLE;
+
+    VkPipelineShaderStageCreateInfo shader_stages[] = {
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_VERTEX_BIT,
+            .module = vert_module,
+            .pName = "Vertex",
+        },
+        {
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+            .module = frag_module,
+            .pName = "Fragment",
+        },
     };
+
+    VkGraphicsPipelineCreateInfo pipeline_create_info = {
+        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .stageCount = 1,
+        .pStages = &shader_stages[0]};
     vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info,
                               nullptr, pipelines.data());
   }
@@ -674,11 +697,13 @@ class App {
     // and the queue as well
     create_logical_device();
     create_swapchain();
-    // create_image_view();
 
     create_depth_buffer();
     create_render_pass();
     create_pipeline();
+
+    // needed in the render pass
+    create_image_view();
 
     // dbg_get_surface_output_formats();
   }
