@@ -25,9 +25,9 @@ elseif(APPLE)
   # cmake_print_variables(CMAKE_INCLUDE_PATH CMAKE_SYSTEM_INCLUDE_PATH CMAKE_PREFIX_PATH)
 endif()
 
-
-find_package(Vulkan REQUIRED)
+find_package(Vulkan REQUIRED shaderc_combined)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
+find_package(fmt CONFIG REQUIRED)
 
-target_link_libraries(vulkan_project Vulkan::Vulkan Vulkan::Headers glfw glm::glm)
+target_link_libraries(vulkan_project Vulkan::Vulkan Vulkan::Headers Vulkan::shaderc_combined glfw glm::glm fmt::fmt)

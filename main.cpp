@@ -19,8 +19,9 @@
 #include <vector>
 
 // api for glsl -> spirv conversion
+#include <fmt/core.h>
+#include <fmt/ranges.h>
 #include <filesystem>
-#include <format>
 #include <fstream>
 #include <shaderc/shaderc.hpp>
 
@@ -31,6 +32,7 @@ const char* os = "windows";
 #endif
 
 using namespace std;
+using namespace fmt;
 using namespace filesystem;
 
 #define u32 uint32_t
@@ -675,16 +677,15 @@ class App {
   optional<string> read_to_string(path p) {
     string output;
 
-    ifstream f;
-    f.open(p);
-    if (f.is_open()) {
-      string line;
-      while (getline(f, line)) {
-        cout << line << endl;
-        output += line;
-      }
+    ifstream in;
+    in.open(p, ios::binary);
+    if (in.is_open()) {
+      output.resize(file_size(p));
+      in.seekg(ios::beg);
+      in.read(&output[0], output.size());
+      in.close();
     } else {
-      cerr << "failed to open file" << endl;
+      println("failed to open file for reading");
       return {};
     }
     return output;
@@ -692,63 +693,82 @@ class App {
 
   // function basically copied from
   // https://github.com/google/shaderc/blob/main/examples/online-compile/main.cc
-  optional<vector<uint32_t>> get_spirv_from_glsl(const std::string& source,
-                                                 shaderc_shader_kind kind,
-                                                 const std::string& source_path,
-                                                 bool optimize = false) {
+  optional<vector<u32>> get_spirv_from_glsl(const std::string& source_code,
+                                            shaderc_shader_kind kind,
+                                            const std::string& source_path,
+                                            bool optimize = false) {
     shaderc::Compiler compiler;
     shaderc::CompileOptions options;
 
+    // optimize the compiled shader binary if needed
     if (optimize) {
       options.SetOptimizationLevel(shaderc_optimization_level_size);
     }
 
-    shaderc::SpvCompilationResult result =
-        compiler.CompileGlslToSpv(source, kind, source_path.c_str(), options);
+    // no idea why you need to include both the source code and the source path
+    // at the same time, maybe it's for debugging?
+    shaderc::SpvCompilationResult result = compiler.CompileGlslToSpv(
+        source_code, kind, source_path.c_str(), options);
 
     if (result.GetCompilationStatus() == shaderc_compilation_status_success) {
-      // creates a new vector from an "initializer list", which is basically an iterator
-      // costs a copy, wonder if u can do it in place instead?
-      vector<uint32_t> output = {result.cbegin(), result.cend()};
+      // creates a new vector from an "initializer list", which is basically an
+      // iterator costs a copy, wonder if you can do it in place instead?
+      vector<u32> output = {result.cbegin(), result.cend()};
       return output;
-      // Use the compiled SPIR-V binary (spirv) as needed
-
     } else {
       // Handle compilation error
-      std::cerr << result.GetErrorMessage();
+      println("failed to compile shader file `{}`, here is error message: ",
+              source_path);
+      cerr << "```" << endl;
+      cout << result.GetErrorMessage();
+      cerr << "```" << endl;
+      cerr << "(If the error message was empty, make sure shader stages are "
+              "defined in shader)"
+           << endl;
       return {};
     }
   }
 
-  optional<VkShaderModule> get_compiled_shader_module(string shader_name) {
-    optional<VkShaderModule> module;
+  optional<VkShaderModule> get_compiled_shader_module(
+      string shader_name,
+      shaderc_shader_kind shader_kind) {
     // get shader_name from shaders folder
-    path path = get_current_working_dir() / "shaders" / shader_name;
+    path source_path = get_current_working_dir() / "shaders" / shader_name;
+    optional<string> source_code = read_to_string(source_path);
 
-    optional<string> source = read_to_string(path);
+    if (!source_code.has_value()) {
+      println("failed to read source code from {}", shader_name);
+      return {};
+    }
 
-    if (!source.has_value()) {
+    optional<vector<u32>> spirv = get_spirv_from_glsl(
+        source_code.value(), shader_kind, source_path.string());
+
+    if (!spirv.has_value()) {
+      println("unable to compile spirv for {}", shader_name);
       return {};
     }
 
     VkShaderModuleCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = NULL,
-        .pCode = nullptr};
+        // sizeof(u32) is 4
+        .codeSize = spirv.value().size() * sizeof(u32),
+        .pCode = spirv.value().data()};
 
-    // vkCreateShaderModule(device, nullptr, &frag_module);
+    VkShaderModule module;
+    vkCreateShaderModule(device, &create_info, nullptr, &module);
     return module;
   }
 
   void create_pipeline() {
     optional<VkShaderModule> vert_module =
-        get_compiled_shader_module("main.vert");
+        get_compiled_shader_module("main.vert", shaderc_glsl_infer_from_source);
     if (!vert_module.has_value()) {
       throw runtime_error("unable to create vertex shader module");
     }
 
     optional<VkShaderModule> frag_module =
-        get_compiled_shader_module("main.frag");
+        get_compiled_shader_module("main.frag", shaderc_glsl_infer_from_source);
 
     if (!frag_module.has_value()) {
       throw runtime_error("unable to create fragment shader module");
@@ -773,8 +793,8 @@ class App {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .stageCount = 1,
         .pStages = &shader_stages[0]};
-    vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_create_info,
-                              nullptr, pipelines.data());
+    // vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+    // &pipeline_create_info, nullptr, pipelines.data());
   }
 
   void init_vulkan() {
