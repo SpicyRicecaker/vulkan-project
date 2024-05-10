@@ -667,10 +667,13 @@ class App {
   }
 
   path get_current_working_dir() {
-#ifdef _DEBUG
-    return current_path().parent_path().parent_path().parent_path();
-#elif
+    println("{}", current_path().string());
+#ifdef NDEBUG
+    // release mode code
     return current_path();
+#else
+    // debug mode code
+    return current_path().parent_path();
 #endif
   }
 

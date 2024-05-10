@@ -12,7 +12,7 @@ brew install glfw glm
 
 ```shell
 mkdir build && cd build # in root dir
-cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=1 .. && make -j && ./vulkan_project
+cmake --preset arm-debug-macos -DCMAKE_EXPORT_COMPILE_COMMANDS=1 .. && ninja && ./vulkan_project
 ```
 
 ## Compiling & Running (Windows)

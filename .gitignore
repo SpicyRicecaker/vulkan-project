@@ -2,6 +2,7 @@
 
 /out
 /build
+/install
 
 /.vs
 /vcpkg_installed
