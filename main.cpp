@@ -67,6 +67,7 @@ class App {
   VkImage depth_buffer;
   VkFormat depth_buffer_format;
   vector<VkPipeline> pipelines;
+  VkExtent2D swapchain_image_extent;
 
   int window_width;
   int window_height;
@@ -532,7 +533,7 @@ class App {
       throw runtime_error("swapchain doesn't have supported formats");
     }
 
-    VkExtent2D image_extent = {.width = static_cast<u32>(window_width),
+    VkExtent2D swapchain_image_extent = {.width = static_cast<u32>(window_width),
                                .height = static_cast<u32>(window_height)};
 
     QueueFamilyIndex index = find_queue_family_index();
@@ -543,7 +544,7 @@ class App {
         .minImageCount = min_image_count,
         .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
         .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-        .imageExtent = image_extent,
+        .imageExtent = swapchain_image_extent,
         .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         // only good if we have one queue writing to the swapchain??
@@ -670,7 +671,7 @@ class App {
 
   void create_pipeline() {
     Pipeline p;
-    pipelines = p.create(device);
+    pipelines = p.create(device, swapchain_image_extent, render_pass);
     // vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
     // &pipeline_create_info, nullptr, pipelines.data());
   }
