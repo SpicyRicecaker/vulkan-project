@@ -31,4 +31,4 @@ find_package(glfw3 CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 
-target_link_libraries(vulkan_project Vulkan::Vulkan Vulkan::Headers Vulkan::shaderc_combined glfw glm::glm fmt::fmt lib)
+target_link_libraries(vulkan_project Vulkan::Vulkan Vulkan::Headers Vulkan::shaderc_combined glfw glm::glm fmt::fmt)

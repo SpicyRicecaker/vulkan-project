@@ -7,6 +7,7 @@
 #include <fmt/ranges.h>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <iostream>
 #include <optional>
 #include <shaderc/shaderc.hpp>
@@ -35,14 +36,14 @@ struct Pipeline {
     string output;
 
     fstream in;
-    in.open(p, ios::binary);
+    in.open(p, std::ios::in | ios::binary);
     if (in.is_open()) {
       output.resize(file_size(p));
       in.seekg(ios::beg);
       in.read(&output[0], output.size());
       in.close();
     } else {
-      println("failed to open file for reading");
+      println("failed to open file for reading {}", p.string());
       return {};
     }
     return output;
@@ -149,7 +150,7 @@ struct Pipeline {
     this->shader_stages = shader_stages;
   }
 
-  VkPipeline* create(VkDevice device) {
+  vector<VkPipeline> create(VkDevice device) {
     create_shader_stages(device);
 
     VkGraphicsPipelineCreateInfo pipeline_create_infos[] = {{
@@ -162,5 +163,6 @@ struct Pipeline {
 
     vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_create_infos[0],
                               nullptr, pipelines.data());
+    return pipelines;
   }
 };

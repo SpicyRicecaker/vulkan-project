@@ -670,7 +670,7 @@ class App {
 
   void create_pipeline() {
     Pipeline p;
-    pipelines.push_back(p.create(device));
+    pipelines = p.create(device);
     // vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
     // &pipeline_create_info, nullptr, pipelines.data());
   }
