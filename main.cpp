@@ -62,12 +62,14 @@ class App {
   VkRenderPass render_pass;
   VkSwapchainKHR swapchain;
   vector<VkImage> swapchain_images;
+  vector<VkImageView> swapchain_image_views;
   VkFormat swapchain_image_format;
   VkColorSpaceKHR swapchain_image_colorspace;
   VkImage depth_buffer;
   VkFormat depth_buffer_format;
   vector<VkPipeline> pipelines;
   VkExtent2D swapchain_image_extent;
+  vector<VkFramebuffer> swapChainFramebuffers;
 
   int window_width;
   int window_height;
@@ -533,8 +535,9 @@ class App {
       throw runtime_error("swapchain doesn't have supported formats");
     }
 
-    VkExtent2D swapchain_image_extent = {.width = static_cast<u32>(window_width),
-                               .height = static_cast<u32>(window_height)};
+    VkExtent2D swapchain_image_extent = {
+        .width = static_cast<u32>(window_width),
+        .height = static_cast<u32>(window_height)};
 
     QueueFamilyIndex index = find_queue_family_index();
 
@@ -664,9 +667,13 @@ class App {
 
   // image views used at runtime during pipeline rendering
   void create_image_view() {
-    VkImageViewCreateInfo image_view_info = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-    };
+    for (auto swapchain_image : swapchain_images) {
+      VkImageViewCreateInfo image_view_info = {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 
+          .image = swapchain_image,
+          .viewType = VK_IMAGE_VIEW_TYPE_2D
+      };
+    }
   }
 
   void create_pipeline() {
@@ -674,6 +681,28 @@ class App {
     pipelines = p.create(device, swapchain_image_extent, render_pass);
     // vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
     // &pipeline_create_info, nullptr, pipelines.data());
+  }
+
+  void create_framebuffers() {
+    swapChainFramebuffers.resize(swapchain_image_views.size());
+
+    for (size_t i = 0; i < swapchain_image_views.size(); i++) {
+      VkImageView attachments[] = {swapchain_images[i]};
+
+      VkFramebufferCreateInfo framebufferInfo{};
+      framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+      framebufferInfo.renderPass = renderPass;
+      framebufferInfo.attachmentCount = 1;
+      framebufferInfo.pAttachments = attachments;
+      framebufferInfo.width = swapChainExtent.width;
+      framebufferInfo.height = swapChainExtent.height;
+      framebufferInfo.layers = 1;
+
+      if (vkCreateFramebuffer(device, &framebufferInfo, nullptr,
+                              &swapChainFramebuffers[i]) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create framebuffer!");
+      }
+    }
   }
 
   void init_vulkan() {
@@ -691,8 +720,10 @@ class App {
     create_render_pass();
     create_pipeline();
 
-    // needed in the render pass
+    // needed in the render pass*
+    // * assuming no dynamic rendering
     create_image_view();
+    create_framebuffers();
 
     // dbg_get_surface_output_formats();
   }
