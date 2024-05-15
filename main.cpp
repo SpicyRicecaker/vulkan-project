@@ -66,10 +66,12 @@ class App {
   VkFormat swapchain_image_format;
   VkColorSpaceKHR swapchain_image_colorspace;
   VkImage depth_buffer;
+  VkImageView depth_buffer_view;
   VkFormat depth_buffer_format;
   vector<VkPipeline> pipelines;
   VkExtent2D swapchain_image_extent;
   vector<VkFramebuffer> swapChainFramebuffers;
+  Pipeline pipeline_constructor;
 
   int window_width;
   int window_height;
@@ -535,9 +537,8 @@ class App {
       throw runtime_error("swapchain doesn't have supported formats");
     }
 
-    VkExtent2D swapchain_image_extent = {
-        .width = static_cast<u32>(window_width),
-        .height = static_cast<u32>(window_height)};
+    swapchain_image_extent = {.width = static_cast<u32>(window_width),
+                              .height = static_cast<u32>(window_height)};
 
     QueueFamilyIndex index = find_queue_family_index();
 
@@ -586,7 +587,8 @@ class App {
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
-    vkCreateImage(device, &image_info, nullptr, &depth_buffer);
+    // TODO : USE VMA TO CREATE THIS IMAGE AND ALSO DEALLOCATE IT LATER WHEN UNEEDED
+    //vkCreateImage(device, &image_info, nullptr, &depth_buffer);
   }
 
   void create_render_pass() {
@@ -665,37 +667,73 @@ class App {
     vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass);
   }
 
+  VkImageView create_image_view(VkImage image,
+                                VkFormat format,
+                                VkImageAspectFlags flags) {
+    VkImageView image_view;
+    VkImageViewCreateInfo image_view_info = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = image,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = format,
+        // keep channels the same
+        .components =
+            {
+                .r = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+        .subresourceRange = {
+            .aspectMask = flags,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        }};
+    if (vkCreateImageView(device, &image_view_info, nullptr, &image_view) !=
+        VK_SUCCESS) {
+      throw runtime_error("failed to create image view!");
+    }
+    return image_view;
+  }
+
+  void create_depth_buffer_view() {
+    depth_buffer_view = create_image_view(depth_buffer, depth_buffer_format,
+                                          VK_IMAGE_ASPECT_DEPTH_BIT);
+  }
+
   // image views used at runtime during pipeline rendering
-  void create_image_view() {
+  void create_image_views() {
+    swapchain_image_views.resize(swapchain_images.size());
+    auto i = 0;
     for (auto swapchain_image : swapchain_images) {
-      VkImageViewCreateInfo image_view_info = {
-          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, 
-          .image = swapchain_image,
-          .viewType = VK_IMAGE_VIEW_TYPE_2D
-      };
+      swapchain_image_views[i] = create_image_view(
+          swapchain_image, swapchain_image_format, VK_IMAGE_ASPECT_COLOR_BIT);
+      i++;
     }
   }
 
   void create_pipeline() {
-    Pipeline p;
-    pipelines = p.create(device, swapchain_image_extent, render_pass);
+    pipelines = pipeline_constructor.create(device, swapchain_image_extent, render_pass);
     // vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
     // &pipeline_create_info, nullptr, pipelines.data());
   }
 
   void create_framebuffers() {
     swapChainFramebuffers.resize(swapchain_image_views.size());
+    println("xd: {}", swapchain_image_views.size());
 
     for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-      VkImageView attachments[] = {swapchain_images[i]};
+      VkImageView attachments[] = {swapchain_image_views[i], depth_buffer_view};
 
       VkFramebufferCreateInfo framebufferInfo{};
       framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-      framebufferInfo.renderPass = renderPass;
-      framebufferInfo.attachmentCount = 1;
+      framebufferInfo.renderPass = render_pass;
+      framebufferInfo.attachmentCount = 2;
       framebufferInfo.pAttachments = attachments;
-      framebufferInfo.width = swapChainExtent.width;
-      framebufferInfo.height = swapChainExtent.height;
+      framebufferInfo.width = swapchain_image_extent.width;
+      framebufferInfo.height = swapchain_image_extent.height;
+      println("{}x{}", framebufferInfo.width, framebufferInfo.height);
       framebufferInfo.layers = 1;
 
       if (vkCreateFramebuffer(device, &framebufferInfo, nullptr,
@@ -722,7 +760,8 @@ class App {
 
     // needed in the render pass*
     // * assuming no dynamic rendering
-    create_image_view();
+    create_image_views();
+    create_depth_buffer_view();
     create_framebuffers();
 
     // dbg_get_surface_output_formats();
@@ -741,6 +780,20 @@ class App {
   }
   void cleanup() {
     destroy_debug_messenger();
+    for (auto framebuffer : swapChainFramebuffers) {
+      vkDestroyFramebuffer(device, framebuffer, nullptr);
+    }
+    for (auto swapchain_image_view : swapchain_image_views) {
+      vkDestroyImageView(device, swapchain_image_view, nullptr);
+    }
+    vkDestroyImageView(device, depth_buffer_view, nullptr);
+    for (auto image : swapchain_images) {
+      vkDestroyImage(device, image, nullptr);
+    }
+    vkDestroyImage(device, depth_buffer, nullptr);
+    vkDestroyPipelineLayout(device, pipeline_constructor.pipelineLayout,
+                            nullptr);
+
     vkDestroySwapchainKHR(device, swapchain, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);

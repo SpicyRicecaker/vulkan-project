@@ -24,6 +24,7 @@ struct Pipeline {
   VkPipelineDynamicStateCreateInfo dynamic_state;
   VkPipelineVertexInputStateCreateInfo vertex_input_info;
   VkPipelineInputAssemblyStateCreateInfo inputAssembly;
+  VkPipelineLayout pipelineLayout;
 
   path get_current_working_dir() {
     // println("{}", current_path().string());
@@ -184,9 +185,10 @@ struct Pipeline {
     this->inputAssembly = inputAssembly;
   }
 
-  vector<VkPipeline> create(VkDevice device,
-                            VkExtent2D swapchain_image_extent,
-                            VkRenderPass render_pass) {
+  vector<VkPipeline> create(
+      VkDevice device,
+      VkExtent2D swapchain_image_extent,
+      VkRenderPass render_pass) {
     create_shader_stages(device);
     create_dynamic_state();
     create_vertex_input_info();
@@ -283,8 +285,6 @@ struct Pipeline {
     colorBlending.blendConstants[3] = 0.0f;  // Optional
 
     // # pipeline layout (for uniforms?)
-    VkPipelineLayout pipelineLayout;
-
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 0;     // Optional
