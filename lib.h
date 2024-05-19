@@ -7,6 +7,7 @@
 #include <fmt/ranges.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <shaderc/shaderc.hpp>
@@ -18,6 +19,30 @@ using namespace filesystem;
 
 #define u32 uint32_t
 
+struct DeletionStack {
+  vector<function<void()>> cleanup_functions;
+
+  void init() {
+    // shouldn't be more than this many vulkan objects at a time
+    // apparently deque has less allocations and copies than vector,
+    // but the implementation is really complicated
+    cleanup_functions.reserve(20);
+  }
+  // move semantics
+  // since lambdas as an argument are rvalues, can take ownership instead of
+  // copying
+  void push(function<void()>&& fn) { cleanup_functions.push_back(fn); }
+
+  // flush from back first
+  void flush() {
+    for (auto it = cleanup_functions.rbegin(); it != cleanup_functions.rend();
+         it++) {
+      (*it)();
+    }
+    cleanup_functions.clear();
+  }
+};
+
 struct Pipeline {
   vector<VkPipelineShaderStageCreateInfo> shader_stages;
   vector<VkDynamicState> dynamic_states;
@@ -25,6 +50,7 @@ struct Pipeline {
   VkPipelineVertexInputStateCreateInfo vertex_input_info;
   VkPipelineInputAssemblyStateCreateInfo inputAssembly;
   VkPipelineLayout pipelineLayout;
+  DeletionStack deletion_stack;
 
   path get_current_working_dir() {
     // println("{}", current_path().string());
@@ -185,10 +211,9 @@ struct Pipeline {
     this->inputAssembly = inputAssembly;
   }
 
-  vector<VkPipeline> create(
-      VkDevice device,
-      VkExtent2D swapchain_image_extent,
-      VkRenderPass render_pass) {
+  vector<VkPipeline> create(VkDevice device,
+                            VkExtent2D swapchain_image_extent,
+                            VkRenderPass render_pass) {
     create_shader_stages(device);
     create_dynamic_state();
     create_vertex_input_info();
@@ -295,8 +320,11 @@ struct Pipeline {
 
     if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
                                &pipelineLayout) != VK_SUCCESS) {
-      throw std::runtime_error("failed to create pipeline layout!");
+      throw runtime_error("failed to create pipeline layout!");
     }
+    deletion_stack.push([=, this]() {
+      vkDestroyPipelineLayout(device, this->pipelineLayout, nullptr);
+    });
 
     VkGraphicsPipelineCreateInfo pipeline_create_infos[] = {{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -319,9 +347,13 @@ struct Pipeline {
 
     vector<VkPipeline> pipelines(1);
 
-    vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_create_infos[0],
-                              nullptr, pipelines.data());
-    for (auto stage : this->shader_stages) {
+    if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_create_infos[0],
+                                  nullptr, pipelines.data()) != VK_SUCCESS) {
+      throw runtime_error("unable to create graphics pipeline");
+    };
+
+
+        for (auto stage : this->shader_stages) {
       vkDestroyShaderModule(device, stage.module, nullptr);
     }
     return pipelines;

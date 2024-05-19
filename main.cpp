@@ -1,9 +1,12 @@
 #include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vulkan_core.h>
+// #define VMA_IMPLEMENTATION
+// #include "vk_mem_alloc.h"
 
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -24,6 +27,9 @@
 #include <filesystem>
 #include <fstream>
 #include <shaderc/shaderc.hpp>
+// might need to change this include dir based on OS
+#define VMA_IMPLEMENTATION
+#include <vma/vk_mem_alloc.h>
 
 #include "lib.h"
 
@@ -54,6 +60,7 @@ const vector<const char*> wanted_device_extensions = {
 class App {
  public:
   GLFWwindow* window;
+  VmaAllocator _allocator;
   VkInstance instance;
   VkDebugUtilsMessengerEXT debug_messenger;
   VkPhysicalDevice physical_device;
@@ -72,6 +79,7 @@ class App {
   VkExtent2D swapchain_image_extent;
   vector<VkFramebuffer> swapChainFramebuffers;
   Pipeline pipeline_constructor;
+  DeletionStack deletion_stack;
 
   int window_width;
   int window_height;
@@ -234,6 +242,8 @@ class App {
     if (vkCreateInstance(&create_info, nullptr, &instance) != VK_SUCCESS) {
       throw runtime_error("failed to create instance");
     };
+    deletion_stack.push(
+        [this]() { vkDestroyInstance(this->instance, nullptr); });
   }
 
   VkResult CreateDebugUtilsMessengerEXT(
@@ -289,6 +299,7 @@ class App {
                                      &debug_messenger) != VK_SUCCESS) {
       throw runtime_error("failed to create debug messenger");
     };
+    deletion_stack.push([this]() { this->destroy_debug_messenger(); });
   }
 
   void choose_physical_device() {
@@ -465,6 +476,7 @@ class App {
                        &device) != VK_SUCCESS) {
       throw runtime_error("unable to create device");
     };
+    deletion_stack.push([this]() { vkDestroyDevice(this->device, nullptr); });
 
     // queues can be requested later based on the logical device
     VkQueue queue;
@@ -477,6 +489,9 @@ class App {
         VK_SUCCESS) {
       throw runtime_error("unable to create surface");
     };
+    deletion_stack.push([this]() {
+      vkDestroySurfaceKHR(this->instance, this->surface, nullptr);
+    });
   }
 
   struct SwapChainSupportDetails {
@@ -558,7 +573,14 @@ class App {
         .preTransform = swapchain_support_details.capabilities.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .clipped = VK_TRUE};
-    vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr, &swapchain);
+
+    if (vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr,
+                             &swapchain) != VK_SUCCESS) {
+      throw runtime_error("failed to create swapchain");
+    }
+    deletion_stack.push([this]() {
+      vkDestroySwapchainKHR(this->device, this->swapchain, nullptr);
+    });
 
     u32 image_count;
     vkGetSwapchainImagesKHR(device, swapchain, &image_count, nullptr);
@@ -587,8 +609,10 @@ class App {
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
 
-    // TODO : USE VMA TO CREATE THIS IMAGE AND ALSO DEALLOCATE IT LATER WHEN UNEEDED
-    //vkCreateImage(device, &image_info, nullptr, &depth_buffer);
+    // TODO : USE VMA TO CREATE THIS IMAGE AND ALSO DEALLOCATE IT LATER WHEN
+    // UNEEDED
+    // vkCreateImage(device, &image_info, nullptr, &depth_buffer);
+    // vkDestroyImage(device, depth_buffer, nullptr);
   }
 
   void create_render_pass() {
@@ -664,7 +688,13 @@ class App {
         .dependencyCount = 1,
         .pDependencies = &subpass_dependencies[0]};
 
-    vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass);
+    if (vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass) !=
+        VK_SUCCESS) {
+      throw runtime_error("failed to create render pass");
+    };
+    deletion_stack.push([this]() {
+      vkDestroyRenderPass(this->device, this->render_pass, nullptr);
+    });
   }
 
   VkImageView create_image_view(VkImage image,
@@ -700,6 +730,9 @@ class App {
   void create_depth_buffer_view() {
     depth_buffer_view = create_image_view(depth_buffer, depth_buffer_format,
                                           VK_IMAGE_ASPECT_DEPTH_BIT);
+    deletion_stack.push([=, this]() {
+      vkDestroyImageView(this->device, depth_buffer_view, nullptr);
+    });
   }
 
   // image views used at runtime during pipeline rendering
@@ -709,14 +742,23 @@ class App {
     for (auto swapchain_image : swapchain_images) {
       swapchain_image_views[i] = create_image_view(
           swapchain_image, swapchain_image_format, VK_IMAGE_ASPECT_COLOR_BIT);
+      deletion_stack.push([=, this]() {
+        vkDestroyImageView(this->device, swapchain_image_views[i], nullptr);
+      });
+
       i++;
     }
   }
 
   void create_pipeline() {
-    pipelines = pipeline_constructor.create(device, swapchain_image_extent, render_pass);
-    // vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
-    // &pipeline_create_info, nullptr, pipelines.data());
+    pipelines = pipeline_constructor.create(device, swapchain_image_extent,
+                                            render_pass);
+    deletion_stack.push([this]() {
+      pipeline_constructor.deletion_stack.flush();
+      for (auto& pipeline : pipelines) {
+        vkDestroyPipeline(device, pipeline, nullptr);
+      };
+    });
   }
 
   void create_framebuffers() {
@@ -743,7 +785,18 @@ class App {
     }
   }
 
+  void create_allocator() {
+    // initialize the memory allocator
+    VmaAllocatorCreateInfo allocatorInfo = {};
+    allocatorInfo.physicalDevice = physical_device;
+    allocatorInfo.device = device;
+    allocatorInfo.instance = instance;
+    allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    vmaCreateAllocator(&allocatorInfo, &_allocator);
+  }
+
   void init_vulkan() {
+    deletion_stack.init();
     // dbg_get_available_extensions();
     create_instance();
     setup_debug_messenger();
@@ -752,6 +805,7 @@ class App {
 
     // and the queue as well
     create_logical_device();
+    create_allocator();
     create_swapchain();
 
     create_depth_buffer();
@@ -761,8 +815,8 @@ class App {
     // needed in the render pass*
     // * assuming no dynamic rendering
     create_image_views();
-    create_depth_buffer_view();
-    create_framebuffers();
+    // create_depth_buffer_view();
+    // create_framebuffers();
 
     // dbg_get_surface_output_formats();
   }
@@ -779,25 +833,11 @@ class App {
     DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nullptr);
   }
   void cleanup() {
-    destroy_debug_messenger();
+    deletion_stack.flush();
     for (auto framebuffer : swapChainFramebuffers) {
       vkDestroyFramebuffer(device, framebuffer, nullptr);
     }
-    for (auto swapchain_image_view : swapchain_image_views) {
-      vkDestroyImageView(device, swapchain_image_view, nullptr);
-    }
-    vkDestroyImageView(device, depth_buffer_view, nullptr);
-    for (auto image : swapchain_images) {
-      vkDestroyImage(device, image, nullptr);
-    }
-    vkDestroyImage(device, depth_buffer, nullptr);
-    vkDestroyPipelineLayout(device, pipeline_constructor.pipelineLayout,
-                            nullptr);
 
-    vkDestroySwapchainKHR(device, swapchain, nullptr);
-    vkDestroyDevice(device, nullptr);
-    vkDestroySurfaceKHR(instance, surface, nullptr);
-    vkDestroyInstance(instance, nullptr);
     glfwDestroyWindow(window);
     glfwTerminate();
   }
