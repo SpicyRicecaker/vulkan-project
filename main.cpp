@@ -55,7 +55,14 @@ const bool enableValidationLayers = true;
 #endif
 
 const vector<const char*> wanted_device_extensions = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+    // unneeded on vulkan 1.3, see https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/enabling_buffer_device_address.html
+    VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME};
+
+struct DepthImage {
+  VkImage image;
+  VmaAllocation allocation;
+};
 
 class App {
  public:
@@ -72,9 +79,9 @@ class App {
   vector<VkImageView> swapchain_image_views;
   VkFormat swapchain_image_format;
   VkColorSpaceKHR swapchain_image_colorspace;
-  VkImage depth_buffer;
-  VkImageView depth_buffer_view;
   VkFormat depth_buffer_format;
+  VkImageView depth_buffer_view;
+  DepthImage depth_image;
   vector<VkPipeline> pipelines;
   VkExtent2D swapchain_image_extent;
   vector<VkFramebuffer> swapChainFramebuffers;
@@ -146,7 +153,7 @@ class App {
     return true;
   }
 
-  void dbg_get_available_extensions() {
+  void dbg_get_available_instance_extensions() {
     u32 extension_count = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &extension_count, nullptr);
 
@@ -162,7 +169,7 @@ class App {
     }
   }
 
-  vector<const char*> get_required_extensions() {
+  vector<const char*> get_required_instance_extensions() {
     // debug
     assert(glfwVulkanSupported());
 
@@ -209,7 +216,7 @@ class App {
                                .apiVersion = VK_API_VERSION_1_3};
 
     // get required extensions
-    auto extensions = get_required_extensions();
+    auto extensions = get_required_instance_extensions();
 
     VkInstanceCreateInfo create_info{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
@@ -313,12 +320,14 @@ class App {
     VkPhysicalDevice best_physical_device = VK_NULL_HANDLE;
 
     for (auto l_physical_device : physical_devices) {
-      VkPhysicalDeviceProperties device_properties;
-      vkGetPhysicalDeviceProperties(l_physical_device, &device_properties);
+      VkPhysicalDeviceProperties2 device_properties {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+      };
+      vkGetPhysicalDeviceProperties2(l_physical_device, &device_properties);
 
       int current_score = 0;
 
-      if (device_properties.deviceType ==
+      if (device_properties.properties.deviceType ==
           VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
         current_score += 1000;
       }
@@ -400,6 +409,10 @@ class App {
     vkEnumerateDeviceExtensionProperties(physical_device, nullptr,
                                          &device_property_count,
                                          device_extensions.data());
+    // DBG
+    // for (auto& p : device_extensions) {
+    //   println("{}", p.extensionName);
+    // }
 
     bool includes = false;
     for (auto& wde : wanted_device_extensions) {
@@ -414,6 +427,25 @@ class App {
   }
 
   bool is_device_suitable() {
+    // check if device contains VK_KHR_buffer_device_address support
+    bool buffer_device_address_support = false;
+    {
+      VkPhysicalDeviceBufferDeviceAddressFeatures features {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+      };
+      
+      VkPhysicalDeviceFeatures2 device_features = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &features
+      };
+      vkGetPhysicalDeviceFeatures2(physical_device, &device_features);
+      
+      if (features.bufferDeviceAddress == VK_TRUE) {
+        buffer_device_address_support = true;
+      }
+    }
+    
+    
     QueueFamilyIndex queue_family_index = find_queue_family_index();
 
     bool swapchain_support = false;
@@ -461,9 +493,20 @@ class App {
           "validation layers requested but validation layer "
           "does not exist on device");
     }
+    
+    VkPhysicalDeviceBufferDeviceAddressFeatures physical_device_buffer_device_address_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+      .bufferDeviceAddress = VK_TRUE
+    };
+    
+    VkPhysicalDeviceFeatures2 physical_device_features = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &physical_device_buffer_device_address_features
+    };
 
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+        .pNext = &physical_device_features,
         .queueCreateInfoCount = 1,
         .pQueueCreateInfos = device_queue_create_infos.data(),
         .enabledLayerCount = static_cast<u32>(validation_layers.size()),
@@ -549,6 +592,7 @@ class App {
                   swapchain_support_details.capabilities.maxImageCount);
 
     if (!format_valid) {
+      // cout << get_swapchain_support() << endl;
       throw runtime_error("swapchain doesn't have supported formats");
     }
 
@@ -608,11 +652,20 @@ class App {
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
     };
+    // see https://vkguide.dev/docs/chapter-3/depth_buffer/
+    VmaAllocationCreateInfo image_alloc_info = {};
+    image_alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+    image_alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    if (vmaCreateImage(_allocator, &image_info, &image_alloc_info,
+                       &depth_image.image, &depth_image.allocation,
+                       nullptr) != VK_SUCCESS) {
+      cerr << "error creating depth image" << endl;
+    };
 
-    // TODO : USE VMA TO CREATE THIS IMAGE AND ALSO DEALLOCATE IT LATER WHEN
-    // UNEEDED
-    // vkCreateImage(device, &image_info, nullptr, &depth_buffer);
-    // vkDestroyImage(device, depth_buffer, nullptr);
+    deletion_stack.push([this]() {
+      vmaDestroyImage(this->_allocator, this->depth_image.image,
+                      this->depth_image.allocation);
+    });
   }
 
   void create_render_pass() {
@@ -724,15 +777,15 @@ class App {
         VK_SUCCESS) {
       throw runtime_error("failed to create image view!");
     }
+    deletion_stack.push(
+        [=, this]() { vkDestroyImageView(this->device, image_view, nullptr); });
+
     return image_view;
   }
 
   void create_depth_buffer_view() {
-    depth_buffer_view = create_image_view(depth_buffer, depth_buffer_format,
-                                          VK_IMAGE_ASPECT_DEPTH_BIT);
-    deletion_stack.push([=, this]() {
-      vkDestroyImageView(this->device, depth_buffer_view, nullptr);
-    });
+    depth_buffer_view = create_image_view(
+        depth_image.image, depth_buffer_format, VK_IMAGE_ASPECT_DEPTH_BIT);
   }
 
   // image views used at runtime during pipeline rendering
@@ -742,10 +795,6 @@ class App {
     for (auto swapchain_image : swapchain_images) {
       swapchain_image_views[i] = create_image_view(
           swapchain_image, swapchain_image_format, VK_IMAGE_ASPECT_COLOR_BIT);
-      deletion_stack.push([=, this]() {
-        vkDestroyImageView(this->device, swapchain_image_views[i], nullptr);
-      });
-
       i++;
     }
   }
@@ -793,11 +842,13 @@ class App {
     allocatorInfo.instance = instance;
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     vmaCreateAllocator(&allocatorInfo, &_allocator);
+    deletion_stack.push([this]() {
+      vmaDestroyAllocator(this->_allocator);
+    });
   }
 
   void init_vulkan() {
     deletion_stack.init();
-    // dbg_get_available_extensions();
     create_instance();
     setup_debug_messenger();
     choose_physical_device();
@@ -809,12 +860,12 @@ class App {
     create_swapchain();
 
     create_depth_buffer();
-    create_render_pass();
-    create_pipeline();
+    // create_render_pass();
+    // create_pipeline();
 
-    // needed in the render pass*
-    // * assuming no dynamic rendering
-    create_image_views();
+    // // needed in the render pass*
+    // // * assuming no dynamic rendering
+    // create_image_views();
     // create_depth_buffer_view();
     // create_framebuffers();
 
