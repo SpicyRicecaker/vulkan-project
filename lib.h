@@ -350,10 +350,11 @@ struct Pipeline {
     if (vkCreateGraphicsPipelines(device, nullptr, 1, &pipeline_create_infos[0],
                                   nullptr, pipelines.data()) != VK_SUCCESS) {
       throw runtime_error("unable to create graphics pipeline");
-    };
-
-
-        for (auto stage : this->shader_stages) {
+    }
+    
+    // destroy shader modules immediately after creation, since we don't need it after 
+    // we initialize the pipeline
+    for (auto stage : this->shader_stages) {
       vkDestroyShaderModule(device, stage.module, nullptr);
     }
     return pipelines;

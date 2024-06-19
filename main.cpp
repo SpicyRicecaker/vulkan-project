@@ -801,12 +801,12 @@ class App {
 
   void create_pipeline() {
     pipelines = pipeline_constructor.create(device, swapchain_image_extent,
-                                            render_pass);
+                       render_pass);
     deletion_stack.push([this]() {
-      pipeline_constructor.deletion_stack.flush();
-      for (auto& pipeline : pipelines) {
+      for (auto& pipeline : this->pipelines) {
         vkDestroyPipeline(device, pipeline, nullptr);
       };
+      pipeline_constructor.deletion_stack.flush();
     });
   }
 
@@ -863,15 +863,14 @@ class App {
 
     create_depth_buffer();
     create_render_pass();
-    create_pipeline();
 
     // needed in the render pass*
     // * assuming no dynamic rendering
     create_image_views();
     create_depth_buffer_view();
     create_framebuffers();
-    // create_pipeline();
-
+    
+    create_pipeline();
     // dbg_get_surface_output_formats();
   }
   void main_loop() {
