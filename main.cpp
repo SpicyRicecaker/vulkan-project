@@ -56,7 +56,8 @@ const bool enableValidationLayers = true;
 
 const vector<const char*> wanted_device_extensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-    // unneeded on vulkan 1.3, see https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/enabling_buffer_device_address.html
+    // unneeded on vulkan 1.3, see
+    // https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/enabling_buffer_device_address.html
     VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME};
 
 struct DepthImage {
@@ -320,8 +321,8 @@ class App {
     VkPhysicalDevice best_physical_device = VK_NULL_HANDLE;
 
     for (auto l_physical_device : physical_devices) {
-      VkPhysicalDeviceProperties2 device_properties {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+      VkPhysicalDeviceProperties2 device_properties{
+          .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
       };
       vkGetPhysicalDeviceProperties2(l_physical_device, &device_properties);
 
@@ -430,22 +431,21 @@ class App {
     // check if device contains VK_KHR_buffer_device_address support
     bool buffer_device_address_support = false;
     {
-      VkPhysicalDeviceBufferDeviceAddressFeatures features {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+      VkPhysicalDeviceBufferDeviceAddressFeatures features{
+          .sType =
+              VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
       };
-      
+
       VkPhysicalDeviceFeatures2 device_features = {
-        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .pNext = &features
-      };
+          .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+          .pNext = &features};
       vkGetPhysicalDeviceFeatures2(physical_device, &device_features);
-      
+
       if (features.bufferDeviceAddress == VK_TRUE) {
         buffer_device_address_support = true;
       }
     }
-    
-    
+
     QueueFamilyIndex queue_family_index = find_queue_family_index();
 
     bool swapchain_support = false;
@@ -493,16 +493,16 @@ class App {
           "validation layers requested but validation layer "
           "does not exist on device");
     }
-    
-    VkPhysicalDeviceBufferDeviceAddressFeatures physical_device_buffer_device_address_features = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
-      .bufferDeviceAddress = VK_TRUE
-    };
-    
+
+    VkPhysicalDeviceBufferDeviceAddressFeatures
+        physical_device_buffer_device_address_features = {
+            .sType =
+                VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES,
+            .bufferDeviceAddress = VK_TRUE};
+
     VkPhysicalDeviceFeatures2 physical_device_features = {
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &physical_device_buffer_device_address_features
-    };
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+        .pNext = &physical_device_buffer_device_address_features};
 
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -812,7 +812,6 @@ class App {
 
   void create_framebuffers() {
     swapChainFramebuffers.resize(swapchain_image_views.size());
-    println("xd: {}", swapchain_image_views.size());
 
     for (size_t i = 0; i < swapchain_image_views.size(); i++) {
       VkImageView attachments[] = {swapchain_image_views[i], depth_buffer_view};
@@ -824,13 +823,18 @@ class App {
       framebufferInfo.pAttachments = attachments;
       framebufferInfo.width = swapchain_image_extent.width;
       framebufferInfo.height = swapchain_image_extent.height;
-      println("{}x{}", framebufferInfo.width, framebufferInfo.height);
+
+      // println("{}x{}", framebufferInfo.width, framebufferInfo.height);
+
       framebufferInfo.layers = 1;
 
       if (vkCreateFramebuffer(device, &framebufferInfo, nullptr,
                               &swapChainFramebuffers[i]) != VK_SUCCESS) {
         throw std::runtime_error("failed to create framebuffer!");
       }
+      deletion_stack.push([=, this]() {
+        vkDestroyFramebuffer(device, swapChainFramebuffers[i], nullptr);
+      });
     }
   }
 
@@ -842,9 +846,7 @@ class App {
     allocatorInfo.instance = instance;
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     vmaCreateAllocator(&allocatorInfo, &_allocator);
-    deletion_stack.push([this]() {
-      vmaDestroyAllocator(this->_allocator);
-    });
+    deletion_stack.push([this]() { vmaDestroyAllocator(this->_allocator); });
   }
 
   void init_vulkan() {
@@ -860,14 +862,15 @@ class App {
     create_swapchain();
 
     create_depth_buffer();
-    // create_render_pass();
-    // create_pipeline();
+    create_render_pass();
+    create_pipeline();
 
-    // // needed in the render pass*
-    // // * assuming no dynamic rendering
-    // create_image_views();
-    // create_depth_buffer_view();
-    // create_framebuffers();
+    // needed in the render pass*
+    // * assuming no dynamic rendering
+    create_image_views();
+    create_depth_buffer_view();
+    create_framebuffers();
+    // create_pipeline();
 
     // dbg_get_surface_output_formats();
   }
@@ -885,9 +888,6 @@ class App {
   }
   void cleanup() {
     deletion_stack.flush();
-    for (auto framebuffer : swapChainFramebuffers) {
-      vkDestroyFramebuffer(device, framebuffer, nullptr);
-    }
 
     glfwDestroyWindow(window);
     glfwTerminate();
