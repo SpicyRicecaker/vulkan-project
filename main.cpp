@@ -4,12 +4,14 @@
 // #include "vk_mem_alloc.h"
 
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -65,6 +67,40 @@ struct DepthImage {
   VmaAllocation allocation;
 };
 
+struct Semaphores {
+  VkSemaphore swapchain_image_is_available;
+  VkSemaphore rendering_is_complete;
+};
+
+struct Fences {
+  VkFence command_buffer_can_be_used;
+  VkFence rendering_is_complete;
+};
+
+void VK_CHECK_CONDITIONAL(VkResult result,
+                          string err,
+                          vector<VkResult> optionals) {
+  bool valid = false;
+  for (auto o : optionals) {
+    if (o == result) {
+      valid = true;
+      break;
+    }
+  }
+
+  if (!valid && result != VK_SUCCESS) {
+    println("{}", string_VkResult(result));
+    throw runtime_error(err);
+  }
+}
+
+void VK_CHECK(VkResult result, string err) {
+  if (result != VK_SUCCESS) {
+    println("{}", string_VkResult(result));
+    throw runtime_error(err);
+  }
+}
+
 class App {
  public:
   GLFWwindow* window;
@@ -72,6 +108,7 @@ class App {
   VkInstance instance;
   VkDebugUtilsMessengerEXT debug_messenger;
   VkPhysicalDevice physical_device;
+  u32 physical_device_index;
   VkSurfaceKHR surface;
   VkDevice device;
   VkRenderPass render_pass;
@@ -85,9 +122,15 @@ class App {
   DepthImage depth_image;
   vector<VkPipeline> pipelines;
   VkExtent2D swapchain_image_extent;
-  vector<VkFramebuffer> swapChainFramebuffers;
+  vector<VkFramebuffer> swapchain_framebuffers;
   Pipeline pipeline_constructor;
   DeletionStack deletion_stack;
+  vector<VkCommandBuffer> command_buffers;
+  VkQueue queue;
+  VkCommandPool command_pool;
+  Semaphores semaphores;
+  Fences fences;
+  u32 frame_count = 0;
 
   int window_width;
   int window_height;
@@ -318,6 +361,8 @@ class App {
                                physical_devices.data());
 
     int best_score = -1;
+    u32 best_physical_device_index;
+    u32 i = 0;
     VkPhysicalDevice best_physical_device = VK_NULL_HANDLE;
 
     for (auto l_physical_device : physical_devices) {
@@ -336,7 +381,9 @@ class App {
       if (current_score >= best_score) {
         best_physical_device = l_physical_device;
         best_score = current_score;
+        best_physical_device_index = i;
       }
+      i++;
     }
     // DEBUG
     // VkPhysicalDeviceProperties device_properties;
@@ -344,6 +391,7 @@ class App {
     // cout << device_properties.deviceName << endl;
     //
     this->physical_device = best_physical_device;
+    this->physical_device_index = best_physical_device_index;
   }
 
   void dbg_get_surface_output_formats() {
@@ -669,7 +717,7 @@ class App {
   }
 
   void create_render_pass() {
-    VkAttachmentDescription attachments[] = {
+    vector<VkAttachmentDescription> attachments = {
         // color
         {
             .format = swapchain_image_format,
@@ -679,7 +727,7 @@ class App {
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         },
         // depth
         {.format = depth_buffer_format,
@@ -712,9 +760,7 @@ class App {
     VkDependencyInfo dependencies[] = {
         {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
          .imageMemoryBarrierCount = 2,
-         .pImageMemoryBarriers = nullptr
-
-        },
+         .pImageMemoryBarriers = nullptr},
     };
 
     VkSubpassDependency subpass_dependencies[] = {{
@@ -725,21 +771,23 @@ class App {
         .dstSubpass = 0,
         // specify that we wait until the color_attachment_output stage until we
         // make the transition.
-        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
         .srcAccessMask = 0,
         .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
     }};
 
     VkRenderPassCreateInfo render_pass_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 2,
-        .pAttachments = &attachments[0],
+        .attachmentCount = static_cast<u32>(attachments.size()),
+        .pAttachments = attachments.data(),
         .subpassCount = 1,
-        .pSubpasses = &subpasses[0],
+        .pSubpasses = subpasses,
         .dependencyCount = 1,
-        .pDependencies = &subpass_dependencies[0]};
+        .pDependencies = subpass_dependencies};
 
     if (vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass) !=
         VK_SUCCESS) {
@@ -799,9 +847,97 @@ class App {
     }
   }
 
+  void create_command_pool() {
+    QueueFamilyIndex queue_family_index = find_queue_family_index();
+
+    VkCommandPoolCreateInfo command_pool_create_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = queue_family_index.draw_and_present_family.value()};
+    ;
+
+    if (vkCreateCommandPool(device, &command_pool_create_info, nullptr,
+                            &command_pool) != VK_SUCCESS) {
+      throw runtime_error("failed to create command pool");
+    }
+
+    deletion_stack.push([this]() {
+      vkDestroyCommandPool(this->device, this->command_pool, nullptr);
+    });
+  }
+
+  void create_command_buffers() {
+    const VkCommandBufferAllocateInfo command_buffer_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = command_pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    command_buffers.push_back(VK_NULL_HANDLE);
+    // get command buffer
+    if (vkAllocateCommandBuffers(device, &command_buffer_info,
+                                 command_buffers.data()) != VK_SUCCESS) {
+      throw runtime_error("failed to allocate command buffer");
+    }
+
+    deletion_stack.push([this]() {
+      vkFreeCommandBuffers(this->device, this->command_pool, 1,
+                           this->command_buffers.data());
+    });
+  }
+
+  void create_semaphores() {
+    const VkSemaphoreCreateInfo signaled_semaphore_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    const VkSemaphoreCreateInfo unsignaled_semaphore_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+    };
+
+    vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
+                      &semaphores.swapchain_image_is_available);
+
+    vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
+                      &semaphores.rendering_is_complete);
+
+    deletion_stack.push([this]() {
+      vkDestroySemaphore(device, semaphores.swapchain_image_is_available,
+                         nullptr);
+      vkDestroySemaphore(device, semaphores.rendering_is_complete, nullptr);
+    });
+  }
+
+  void create_fences() {
+    const VkFenceCreateInfo signaled_fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    const VkFenceCreateInfo unsignaled_fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+    };
+
+    vkCreateFence(device, &signaled_fence_info, nullptr,
+                  &fences.command_buffer_can_be_used);
+
+    vkCreateFence(device, &unsignaled_fence_info, nullptr,
+                  &fences.rendering_is_complete);
+
+    deletion_stack.push([this]() {
+      vkDestroyFence(device, fences.rendering_is_complete, nullptr);
+      vkDestroyFence(device, fences.command_buffer_can_be_used, nullptr);
+    });
+  }
+
+  void create_queue() {
+    QueueFamilyIndex queue_family_index = find_queue_family_index();
+    vkGetDeviceQueue(device, queue_family_index.draw_and_present_family.value(),
+                     0, &queue);
+  }
+
   void create_pipeline() {
     pipelines = pipeline_constructor.create(device, swapchain_image_extent,
-                       render_pass);
+                                            render_pass);
     deletion_stack.push([this]() {
       for (auto& pipeline : this->pipelines) {
         vkDestroyPipeline(device, pipeline, nullptr);
@@ -811,7 +947,7 @@ class App {
   }
 
   void create_framebuffers() {
-    swapChainFramebuffers.resize(swapchain_image_views.size());
+    swapchain_framebuffers.resize(swapchain_image_views.size());
 
     for (size_t i = 0; i < swapchain_image_views.size(); i++) {
       VkImageView attachments[] = {swapchain_image_views[i], depth_buffer_view};
@@ -829,11 +965,11 @@ class App {
       framebufferInfo.layers = 1;
 
       if (vkCreateFramebuffer(device, &framebufferInfo, nullptr,
-                              &swapChainFramebuffers[i]) != VK_SUCCESS) {
+                              &swapchain_framebuffers[i]) != VK_SUCCESS) {
         throw std::runtime_error("failed to create framebuffer!");
       }
       deletion_stack.push([=, this]() {
-        vkDestroyFramebuffer(device, swapChainFramebuffers[i], nullptr);
+        vkDestroyFramebuffer(device, swapchain_framebuffers[i], nullptr);
       });
     }
   }
@@ -869,13 +1005,122 @@ class App {
     create_image_views();
     create_depth_buffer_view();
     create_framebuffers();
-    
     create_pipeline();
+
+    // can be created anytime after device is created
+    create_command_pool();
+    create_command_buffers();
+    // synchronization stuff
+    create_fences();
+    create_semaphores();
+    create_queue();
     // dbg_get_surface_output_formats();
   }
   void main_loop() {
     while (!glfwWindowShouldClose(window)) {
       glfwPollEvents();
+
+      // println("{}", frame_count);
+
+      // get command buffer
+      VkCommandBuffer command_buffer = command_buffers[0];
+
+      vkWaitForFences(device, 1, &fences.command_buffer_can_be_used, VK_TRUE,
+                      UINT64_MAX);
+      vkResetFences(device, 1, &fences.command_buffer_can_be_used);
+
+      vkResetCommandBuffer(command_buffer, 0);
+
+      const VkCommandBufferBeginInfo command_buffer_begin_info = {
+          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+          // .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+      };
+
+      VkAcquireNextImageInfoKHR next_image_info = {
+          .sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
+          .swapchain = swapchain,
+          // wait 1 second maxinum
+          .timeout = UINT64_MAX,
+          .semaphore = semaphores.swapchain_image_is_available,
+          .fence = VK_NULL_HANDLE,
+          .deviceMask = static_cast<u32>(1) << physical_device_index};
+
+      u32 swapchain_image_index;
+      VK_CHECK_CONDITIONAL(vkAcquireNextImage2KHR(device, &next_image_info,
+                                                  &swapchain_image_index),
+                           "unable to acquire next image", {VK_SUBOPTIMAL_KHR});
+
+      vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info);
+
+      // THIS IS WHERE THE MAGIC HAPPENS !!
+      // Begin Render Pass
+      const vector<VkClearValue> clear_values = {
+          {.color = {0.0f, 0.0f, 0.0f, 0.0f}},
+          {.depthStencil = {0., 0}},
+      };
+
+      const VkRenderPassBeginInfo renderpassInfo = {
+          .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+          .renderPass = render_pass,
+          .framebuffer = swapchain_framebuffers[swapchain_image_index],
+          .renderArea = {.offset = {0, 0}, .extent = swapchain_image_extent},
+          .clearValueCount = static_cast<u32>(clear_values.size()),
+          .pClearValues = clear_values.data(),
+      };
+      vkCmdBeginRenderPass(command_buffer, &renderpassInfo,
+                           VK_SUBPASS_CONTENTS_INLINE);
+
+      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        pipelines[0]);
+
+      const VkViewport viewport = {
+          .x = 0.0f,
+          .y = 0.0f,
+          .width = static_cast<float>(swapchain_image_extent.width),
+          .height = static_cast<float>(swapchain_image_extent.height),
+          .minDepth = 0.0f,
+          .maxDepth = 1.0f};
+      vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+      const VkRect2D scissor = {
+          .offset = {0, 0},
+          .extent = swapchain_image_extent,
+      };
+      vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+      vkCmdDraw(command_buffer, 3, 1, 0, 0);
+      vkCmdEndRenderPass(command_buffer);
+      VK_CHECK(vkEndCommandBuffer(command_buffer),
+               "failed to end command buffer");
+
+      const VkPipelineStageFlags wait_destination_stage_masks[] = {
+          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+      const VkSubmitInfo submit_info = {
+          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+          .waitSemaphoreCount = 1,
+          .pWaitSemaphores = &semaphores.swapchain_image_is_available,
+          .pWaitDstStageMask = &wait_destination_stage_masks[0],
+          .commandBufferCount = 1,
+          .pCommandBuffers = &command_buffer,
+          .signalSemaphoreCount = 1,
+          .pSignalSemaphores = &semaphores.rendering_is_complete};
+
+      VK_CHECK(vkQueueSubmit(queue, 1, &submit_info,
+                             fences.command_buffer_can_be_used),
+               "failed to submit queue");
+      ;
+
+      VkResult present_result;
+      const VkPresentInfoKHR present_info = {
+          .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+          .waitSemaphoreCount = 1,
+          .pWaitSemaphores = &semaphores.rendering_is_complete,
+          .swapchainCount = 1,
+          .pSwapchains = &swapchain,
+          .pImageIndices = &swapchain_image_index,
+          .pResults = &present_result};
+      vkQueuePresentKHR(queue, &present_info);
+      // VK_CHECK(present_result, "failed to present");
+      frame_count += 1;
     }
   }
   void destroy_debug_messenger() {
@@ -886,6 +1131,10 @@ class App {
     DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nullptr);
   }
   void cleanup() {
+    // wait until last semaphore runs
+    vkWaitForFences(device, 1, &fences.command_buffer_can_be_used, VK_TRUE,
+                    UINT64_MAX);
+
     deletion_stack.flush();
 
     glfwDestroyWindow(window);
