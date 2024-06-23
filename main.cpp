@@ -1,17 +1,20 @@
 #include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vulkan_core.h>
-// #define VMA_IMPLEMENTATION
-// #include "vk_mem_alloc.h"
 
 #include <cassert>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iostream>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
+
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 
@@ -20,26 +23,17 @@
 #include <glm/mat4x4.hpp>
 #include <glm/vec4.hpp>
 
-#include <iostream>
-#include <vector>
-
 // api for glsl -> spirv conversion
 #include <fmt/core.h>
 #include <fmt/ranges.h>
-#include <filesystem>
-#include <fstream>
+
 #include <shaderc/shaderc.hpp>
+
 // might need to change this include dir based on OS
 #define VMA_IMPLEMENTATION
 #include <vma/vk_mem_alloc.h>
 
 #include "lib.h"
-
-#ifdef __APPLE__
-const char* os = "macos";
-#elif _WIN32
-const char* os = "windows";
-#endif
 
 using namespace std;
 using namespace fmt;
@@ -51,10 +45,10 @@ using namespace filesystem;
 const u32 WIDTH = 800;
 const u32 HEIGHT = 600;
 
-#ifdef NDEBUG
-const bool enableValidationLayers = false;
-#else
-const bool enableValidationLayers = true;
+#ifdef __APPLE__
+const char* os = "macos";
+#elif _WIN32
+const char* os = "windows";
 #endif
 
 const vector<const char*> wanted_device_extensions = {
@@ -63,20 +57,11 @@ const vector<const char*> wanted_device_extensions = {
     // https://gpuopen-librariesandsdks.github.io/VulkanMemoryAllocator/html/enabling_buffer_device_address.html
     VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME};
 
-struct DepthImage {
-  VkImage image;
-  VmaAllocation allocation;
-};
-
-struct Semaphores {
-  vector<VkSemaphore> swapchain_image_is_available;
-  vector<VkSemaphore> rendering_is_complete;
-};
-
-struct Fences {
-  vector<VkFence> command_buffer_can_be_used;
-  vector<VkFence> rendering_is_complete;
-};
+#ifdef NDEBUG
+const bool enableValidationLayers = false;
+#else
+const bool enableValidationLayers = true;
+#endif
 
 void VK_CHECK_CONDITIONAL(VkResult result,
                           string err,
@@ -105,45 +90,77 @@ void VK_CHECK(VkResult result, string err) {
 const u32 MAX_IN_FLIGHT_FRAMES = 2;
 
 class App {
+  // organization of struct members
+  // greatly inspired by vulkan samples by ARM developers
+  struct SwapchainDimensions {
+    VkColorSpaceKHR colorspace;
+    VkExtent2D extent;
+    VkFormat format;
+  };
+
+  struct Semaphores {
+    vector<VkSemaphore> swapchain_image_is_available;
+    vector<VkSemaphore> rendering_is_complete;
+  };
+
+  struct Fences {
+    vector<VkFence> command_buffer_can_be_used;
+    vector<VkFence> rendering_is_complete;
+  };
+
+  struct DepthBuffer {
+    VkImage image;
+    VkImageView image_view;
+    VkFormat format;
+    VmaAllocation allocation;
+  };
+
+  // Vulkan objects and global state
+  struct Context {
+    VkInstance instance = VK_NULL_HANDLE;
+    u32 physical_device_index = 0;
+    VkPhysicalDevice physical_device = VK_NULL_HANDLE;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    SwapchainDimensions swapchain_dimensions;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    // per-frame
+    vector<VkImage> swapchain_images;
+    // per-frame
+    vector<VkImageView> swapchain_image_views;
+    // per-frame
+    vector<VkFramebuffer> swapchain_framebuffers;
+    VkCommandPool command_pool = VK_NULL_HANDLE;
+    // per-frame
+    vector<VkCommandBuffer> command_buffers;
+    VkQueue queue = VK_NULL_HANDLE;
+    Pipeline pipeline_constructor;
+    vector<VkPipeline> pipelines = {VK_NULL_HANDLE};
+    Semaphores semaphores;
+    Fences fences;
+
+    //
+    VmaAllocator _allocator;
+    DepthBuffer depth_b;
+    //
+    DeletionStack deletion_stack;
+    VkDebugUtilsMessengerEXT debug_messenger;
+    u32 current_frame = 0;
+  };
+
  public:
   GLFWwindow* window;
-  VmaAllocator _allocator;
-  VkInstance instance;
-  VkDebugUtilsMessengerEXT debug_messenger;
-  VkPhysicalDevice physical_device;
-  u32 physical_device_index;
-  VkSurfaceKHR surface;
-  VkDevice device;
-  VkRenderPass render_pass;
-  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-  vector<VkImage> swapchain_images;
-  vector<VkImageView> swapchain_image_views;
-  VkFormat swapchain_image_format;
-  VkColorSpaceKHR swapchain_image_colorspace;
-  VkFormat depth_buffer_format;
-  VkImageView depth_buffer_view;
-  DepthImage depth_image;
-  vector<VkPipeline> pipelines;
-  VkExtent2D swapchain_image_extent;
-  vector<VkFramebuffer> swapchain_framebuffers;
-  Pipeline pipeline_constructor;
-  DeletionStack deletion_stack;
-  vector<VkCommandBuffer> command_buffers;
-  VkQueue queue;
-  VkCommandPool command_pool;
-  Semaphores semaphores;
-  Fences fences;
-  u32 total_frames_rendered = 0;
-  u32 current_frame = 0;
-
   int window_width;
   int window_height;
   int framebuffer_width;
   int framebuffer_height;
+  u32 total_frames_rendered = 0;
+  Context cx;
 
   void run() {
     init_window();
-    init_vulkan();
+    init_vulkan(cx);
     main_loop();
     teardown();
   }
@@ -258,7 +275,7 @@ class App {
     return extensions;
   }
 
-  void create_instance() {
+  void create_instance(Context& cx) {
     VkApplicationInfo app_info{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                                .pApplicationName = "Vulkan",
                                .applicationVersion = VK_MAKE_VERSION(0, 1, 0),
@@ -297,11 +314,11 @@ class App {
       create_info.pNext = &debug_messenger_info;
     }
 
-    if (vkCreateInstance(&create_info, nullptr, &instance) != VK_SUCCESS) {
+    if (vkCreateInstance(&create_info, nullptr, &cx.instance) != VK_SUCCESS) {
       throw runtime_error("failed to create instance");
     };
-    deletion_stack.push(
-        [this]() { vkDestroyInstance(this->instance, nullptr); });
+    cx.deletion_stack.push(
+        [this]() { vkDestroyInstance(this->cx.instance, nullptr); });
   }
 
   VkResult CreateDebugUtilsMessengerEXT(
@@ -353,18 +370,20 @@ class App {
     // could be a usecase for `volk`
     VkDebugUtilsMessengerCreateInfoEXT debug_messenger_info =
         get_debug_messenger_info();
-    if (CreateDebugUtilsMessengerEXT(instance, &debug_messenger_info, nullptr,
-                                     &debug_messenger) != VK_SUCCESS) {
+    if (CreateDebugUtilsMessengerEXT(cx.instance, &debug_messenger_info,
+                                     nullptr,
+                                     &cx.debug_messenger) != VK_SUCCESS) {
       throw runtime_error("failed to create debug messenger");
     };
-    deletion_stack.push([this]() { this->destroy_debug_messenger(); });
+    cx.deletion_stack.push(
+        [this]() { this->destroy_debug_messenger(this->cx); });
   }
 
-  void choose_physical_device() {
+  void choose_physical_device(Context& cx) {
     u32 physical_device_count;
-    vkEnumeratePhysicalDevices(instance, &physical_device_count, nullptr);
+    vkEnumeratePhysicalDevices(cx.instance, &physical_device_count, nullptr);
     vector<VkPhysicalDevice> physical_devices(physical_device_count);
-    vkEnumeratePhysicalDevices(instance, &physical_device_count,
+    vkEnumeratePhysicalDevices(cx.instance, &physical_device_count,
                                physical_devices.data());
 
     int best_score = -1;
@@ -397,23 +416,23 @@ class App {
     // vkGetPhysicalDeviceProperties(best_physical_device, &device_properties);
     // cout << device_properties.deviceName << endl;
     //
-    this->physical_device = best_physical_device;
-    this->physical_device_index = best_physical_device_index;
+    cx.physical_device = best_physical_device;
+    cx.physical_device_index = best_physical_device_index;
   }
 
-  void dbg_get_surface_output_formats() {
+  void dbg_get_surface_output_formats(Context& cx) {
     // debug surface properties - get output rgba formats
     VkPhysicalDeviceSurfaceInfo2KHR surface_info = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
-        .surface = surface};
+        .surface = cx.surface};
 
     // get supported formats
     u32 surface_formats_count;
-    vkGetPhysicalDeviceSurfaceFormats2KHR(physical_device, &surface_info,
+    vkGetPhysicalDeviceSurfaceFormats2KHR(cx.physical_device, &surface_info,
                                           &surface_formats_count, nullptr);
 
     vector<VkSurfaceFormat2KHR> surface_formats(surface_formats_count);
-    vkGetPhysicalDeviceSurfaceFormats2KHR(physical_device, &surface_info,
+    vkGetPhysicalDeviceSurfaceFormats2KHR(cx.physical_device, &surface_info,
                                           &surface_formats_count,
                                           surface_formats.data());
 
@@ -428,14 +447,14 @@ class App {
     bool isComplete() { return draw_and_present_family.has_value(); };
   };
 
-  QueueFamilyIndex find_queue_family_index() {
+  QueueFamilyIndex find_queue_family_index(Context& cx) {
     // get queue device capabilities from physical device??
     u32 queue_family_property_count;
     vkGetPhysicalDeviceQueueFamilyProperties(
-        physical_device, &queue_family_property_count, nullptr);
+        cx.physical_device, &queue_family_property_count, nullptr);
     vector<VkQueueFamilyProperties> queue_family_properties(
         queue_family_property_count);
-    vkGetPhysicalDeviceQueueFamilyProperties(physical_device,
+    vkGetPhysicalDeviceQueueFamilyProperties(cx.physical_device,
                                              &queue_family_property_count,
                                              queue_family_properties.data());
 
@@ -445,7 +464,7 @@ class App {
     for (auto& p : queue_family_properties) {
       if ((p.queueFlags & VK_QUEUE_GRAPHICS_BIT)) {
         VkBool32 present_support = false;
-        vkGetPhysicalDeviceSurfaceSupportKHR(physical_device, i, surface,
+        vkGetPhysicalDeviceSurfaceSupportKHR(cx.physical_device, i, cx.surface,
                                              &present_support);
         if (present_support) {
           draw_and_present_family = i;
@@ -459,10 +478,10 @@ class App {
 
   bool device_includes_extensions() {
     u32 device_property_count = 0;
-    vkEnumerateDeviceExtensionProperties(physical_device, nullptr,
+    vkEnumerateDeviceExtensionProperties(cx.physical_device, nullptr,
                                          &device_property_count, nullptr);
     std::vector<VkExtensionProperties> device_extensions(device_property_count);
-    vkEnumerateDeviceExtensionProperties(physical_device, nullptr,
+    vkEnumerateDeviceExtensionProperties(cx.physical_device, nullptr,
                                          &device_property_count,
                                          device_extensions.data());
     // DBG
@@ -482,7 +501,7 @@ class App {
     return includes;
   }
 
-  bool is_device_suitable() {
+  bool is_device_suitable(Context& cx) {
     // check if device contains VK_KHR_buffer_device_address support
     bool buffer_device_address_support = false;
     {
@@ -494,14 +513,14 @@ class App {
       VkPhysicalDeviceFeatures2 device_features = {
           .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
           .pNext = &features};
-      vkGetPhysicalDeviceFeatures2(physical_device, &device_features);
+      vkGetPhysicalDeviceFeatures2(cx.physical_device, &device_features);
 
       if (features.bufferDeviceAddress == VK_TRUE) {
         buffer_device_address_support = true;
       }
     }
 
-    QueueFamilyIndex queue_family_index = find_queue_family_index();
+    QueueFamilyIndex queue_family_index = find_queue_family_index(cx);
 
     bool swapchain_support = false;
 
@@ -509,12 +528,12 @@ class App {
     return queue_family_index.isComplete() && device_includes_extensions();
   }
 
-  void create_logical_device() {
-    if (!is_device_suitable()) {
+  void create_logical_device(Context& cx) {
+    if (!is_device_suitable(cx)) {
       throw runtime_error("device not suitable for various reasons");
     }
 
-    QueueFamilyIndex queue_family_index = find_queue_family_index();
+    QueueFamilyIndex queue_family_index = find_queue_family_index(cx);
 
     // only need 1 device for gaming lol
     vector<float> queue_priorities = {1.0};
@@ -570,25 +589,27 @@ class App {
         .ppEnabledExtensionNames = extensions.data(),
     };
 
-    if (vkCreateDevice(physical_device, &device_create_info, nullptr,
-                       &device) != VK_SUCCESS) {
+    if (vkCreateDevice(cx.physical_device, &device_create_info, nullptr,
+                       &cx.device) != VK_SUCCESS) {
       throw runtime_error("unable to create device");
     };
-    deletion_stack.push([this]() { vkDestroyDevice(this->device, nullptr); });
+    cx.deletion_stack.push(
+        [this]() { vkDestroyDevice(this->cx.device, nullptr); });
 
     // queues can be requested later based on the logical device
     VkQueue queue;
-    vkGetDeviceQueue(device, queue_family_index.draw_and_present_family.value(),
-                     0, &queue);
+    vkGetDeviceQueue(cx.device,
+                     queue_family_index.draw_and_present_family.value(), 0,
+                     &queue);
   }
 
-  void create_surface() {
-    if (glfwCreateWindowSurface(instance, window, nullptr, &surface) !=
+  void create_surface(Context& cx) {
+    if (glfwCreateWindowSurface(cx.instance, window, nullptr, &cx.surface) !=
         VK_SUCCESS) {
       throw runtime_error("unable to create surface");
     };
-    deletion_stack.push([this]() {
-      vkDestroySurfaceKHR(this->instance, this->surface, nullptr);
+    cx.deletion_stack.push([this]() {
+      vkDestroySurfaceKHR(this->cx.instance, this->cx.surface, nullptr);
     });
   }
 
@@ -601,29 +622,30 @@ class App {
   SwapChainSupportDetails get_swapchain_support() {
     SwapChainSupportDetails swapchain_support_details;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-        physical_device, surface, &swapchain_support_details.capabilities);
+        cx.physical_device, cx.surface,
+        &swapchain_support_details.capabilities);
 
     u32 surface_formats_count;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface,
+    vkGetPhysicalDeviceSurfaceFormatsKHR(cx.physical_device, cx.surface,
                                          &surface_formats_count, nullptr);
     swapchain_support_details.formats.resize(surface_formats_count);
     vkGetPhysicalDeviceSurfaceFormatsKHR(
-        physical_device, surface, &surface_formats_count,
+        cx.physical_device, cx.surface, &surface_formats_count,
         swapchain_support_details.formats.data());
 
     u32 present_modes_count;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface,
+    vkGetPhysicalDeviceSurfacePresentModesKHR(cx.physical_device, cx.surface,
                                               &present_modes_count, nullptr);
     swapchain_support_details.presentModes.resize(present_modes_count);
     vkGetPhysicalDeviceSurfacePresentModesKHR(
-        physical_device, surface, &present_modes_count,
+        cx.physical_device, cx.surface, &present_modes_count,
         swapchain_support_details.presentModes.data());
 
     return swapchain_support_details;
   }
 
   // creates a swapchain, from an old one, if possible
-  void create_swapchain() {
+  void create_swapchain(Context& cx) {
     // query formats supported by surface
     SwapChainSupportDetails swapchain_support_details = get_swapchain_support();
 
@@ -655,21 +677,22 @@ class App {
     // the surface resolution may be greater or lower than the window
     // dimensions. Only the framebuffer matches up.
 
-    swapchain_image_extent = {.width = static_cast<u32>(framebuffer_width),
-                              .height = static_cast<u32>(framebuffer_height)};
+    cx.swapchain_dimensions.extent = {
+        .width = static_cast<u32>(framebuffer_width),
+        .height = static_cast<u32>(framebuffer_height)};
     // println("dbg: {}x{}", window_width, window_height);
 
-    QueueFamilyIndex index = find_queue_family_index();
+    QueueFamilyIndex index = find_queue_family_index(cx);
 
-    VkSwapchainKHR old_swapchain = swapchain;
+    VkSwapchainKHR old_swapchain = cx.swapchain;
 
     VkSwapchainCreateInfoKHR swapchain_create_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        .surface = surface,
+        .surface = cx.surface,
         .minImageCount = min_image_count,
         .imageFormat = VK_FORMAT_B8G8R8A8_UNORM,
         .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
-        .imageExtent = swapchain_image_extent,
+        .imageExtent = cx.swapchain_dimensions.extent,
         .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         // only good if we have one queue writing to the swapchain??
@@ -681,35 +704,35 @@ class App {
         .clipped = VK_TRUE,
         .oldSwapchain = old_swapchain};
 
-    VK_CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr,
-                                  &swapchain),
+    VK_CHECK(vkCreateSwapchainKHR(cx.device, &swapchain_create_info, nullptr,
+                                  &cx.swapchain),
              "failed to create swapchain");
 
     // after new swapchain is created, all resources can be freed
     // related to the old swapchain
     if (old_swapchain != VK_NULL_HANDLE) {
-      for (auto& swapchain_image_view : swapchain_image_views) {
-        vkDestroyImageView(device, swapchain_image_view, nullptr);
+      for (auto& image_view : cx.swapchain_image_views) {
+        vkDestroyImageView(cx.device, image_view, nullptr);
       }
 
-      vkDestroySwapchainKHR(device, old_swapchain, nullptr);
+      vkDestroySwapchainKHR(cx.device, old_swapchain, nullptr);
     }
 
     u32 image_count;
-    vkGetSwapchainImagesKHR(device, swapchain, &image_count, nullptr);
-    swapchain_images.resize(image_count);
-    vkGetSwapchainImagesKHR(device, swapchain, &image_count,
-                            swapchain_images.data());
-    swapchain_image_format = swapchain_create_info.imageFormat;
-    swapchain_image_colorspace = swapchain_create_info.imageColorSpace;
+    vkGetSwapchainImagesKHR(cx.device, cx.swapchain, &image_count, nullptr);
+    cx.swapchain_images.resize(image_count);
+    vkGetSwapchainImagesKHR(cx.device, cx.swapchain, &image_count,
+                            cx.swapchain_images.data());
+    cx.swapchain_dimensions.format = swapchain_create_info.imageFormat;
+    cx.swapchain_dimensions.colorspace = swapchain_create_info.imageColorSpace;
   }
 
-  void create_depth_buffer() {
-    depth_buffer_format = VK_FORMAT_D32_SFLOAT;
+  void create_depth_buffer(Context& cx) {
+    cx.depth_b.format = VK_FORMAT_D32_SFLOAT;
     VkImageCreateInfo image_info = {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
-        .format = depth_buffer_format,
+        .format = cx.depth_b.format,
         .extent = {.width = static_cast<u32>(framebuffer_width),
                    .height = static_cast<u32>(framebuffer_height),
                    .depth = static_cast<u32>(1)},
@@ -725,23 +748,23 @@ class App {
     VmaAllocationCreateInfo image_alloc_info = {};
     image_alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
     image_alloc_info.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    if (vmaCreateImage(_allocator, &image_info, &image_alloc_info,
-                       &depth_image.image, &depth_image.allocation,
+    if (vmaCreateImage(cx._allocator, &image_info, &image_alloc_info,
+                       &cx.depth_b.image, &cx.depth_b.allocation,
                        nullptr) != VK_SUCCESS) {
       cerr << "error creating depth image" << endl;
     };
 
-    deletion_stack.push([this]() {
-      vmaDestroyImage(this->_allocator, this->depth_image.image,
-                      this->depth_image.allocation);
+    cx.deletion_stack.push([this]() {
+      vmaDestroyImage(this->cx._allocator, this->cx.depth_b.image,
+                      this->cx.depth_b.allocation);
     });
   }
 
-  void create_render_pass() {
+  void create_render_pass(Context& cx) {
     vector<VkAttachmentDescription> attachments = {
         // color
         {
-            .format = swapchain_image_format,
+            .format = cx.swapchain_dimensions.format,
             .samples = VK_SAMPLE_COUNT_1_BIT,
             .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -751,7 +774,7 @@ class App {
             .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         },
         // depth
-        {.format = depth_buffer_format,
+        {.format = cx.depth_b.format,
          .samples = VK_SAMPLE_COUNT_1_BIT,
          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
          .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -810,12 +833,12 @@ class App {
         .dependencyCount = 1,
         .pDependencies = subpass_dependencies};
 
-    if (vkCreateRenderPass(device, &render_pass_info, nullptr, &render_pass) !=
-        VK_SUCCESS) {
+    if (vkCreateRenderPass(cx.device, &render_pass_info, nullptr,
+                           &cx.render_pass) != VK_SUCCESS) {
       throw runtime_error("failed to create render pass");
     };
-    deletion_stack.push([this]() {
-      vkDestroyRenderPass(this->device, this->render_pass, nullptr);
+    cx.deletion_stack.push([this]() {
+      vkDestroyRenderPass(this->cx.device, this->cx.render_pass, nullptr);
     });
   }
 
@@ -842,7 +865,7 @@ class App {
             .baseArrayLayer = 0,
             .layerCount = 1,
         }};
-    if (vkCreateImageView(device, &image_view_info, nullptr, &image_view) !=
+    if (vkCreateImageView(cx.device, &image_view_info, nullptr, &image_view) !=
         VK_SUCCESS) {
       throw runtime_error("failed to create image view!");
     }
@@ -850,26 +873,28 @@ class App {
     return image_view;
   }
 
-  void create_depth_buffer_view() {
-    depth_buffer_view = create_image_view(
-        depth_image.image, depth_buffer_format, VK_IMAGE_ASPECT_DEPTH_BIT);
-    deletion_stack.push(
-        [this]() { vkDestroyImageView(device, depth_buffer_view, nullptr); });
+  void create_depth_buffer_view(Context& cx) {
+    cx.depth_b.image_view = create_image_view(
+        cx.depth_b.image, cx.depth_b.format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    cx.deletion_stack.push([this]() {
+      vkDestroyImageView(this->cx.device, this->cx.depth_b.image_view, nullptr);
+    });
   }
 
   // image views used at runtime during pipeline rendering
-  void create_image_views() {
-    swapchain_image_views.resize(swapchain_images.size());
+  void create_image_views(Context& ctx) {
+    cx.swapchain_image_views.resize(cx.swapchain_images.size());
     auto i = 0;
-    for (auto swapchain_image : swapchain_images) {
-      swapchain_image_views[i] = create_image_view(
-          swapchain_image, swapchain_image_format, VK_IMAGE_ASPECT_COLOR_BIT);
+    for (auto swapchain_image : cx.swapchain_images) {
+      cx.swapchain_image_views[i] =
+          create_image_view(swapchain_image, cx.swapchain_dimensions.format,
+                            VK_IMAGE_ASPECT_COLOR_BIT);
       i++;
     }
   }
 
-  void create_command_pool() {
-    QueueFamilyIndex queue_family_index = find_queue_family_index();
+  void create_command_pool(Context& cx) {
+    QueueFamilyIndex queue_family_index = find_queue_family_index(cx);
 
     VkCommandPoolCreateInfo command_pool_create_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -877,62 +902,64 @@ class App {
         .queueFamilyIndex = queue_family_index.draw_and_present_family.value()};
     ;
 
-    if (vkCreateCommandPool(device, &command_pool_create_info, nullptr,
-                            &command_pool) != VK_SUCCESS) {
+    if (vkCreateCommandPool(cx.device, &command_pool_create_info, nullptr,
+                            &cx.command_pool) != VK_SUCCESS) {
       throw runtime_error("failed to create command pool");
     }
 
-    deletion_stack.push([this]() {
-      vkDestroyCommandPool(this->device, this->command_pool, nullptr);
+    cx.deletion_stack.push([this]() {
+      vkDestroyCommandPool(this->cx.device, this->cx.command_pool, nullptr);
     });
   }
 
-  void create_command_buffers() {
+  void create_command_buffers(Context& cx) {
     const VkCommandBufferAllocateInfo command_buffer_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = command_pool,
+        .commandPool = cx.command_pool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = MAX_IN_FLIGHT_FRAMES,
     };
-    command_buffers.resize(MAX_IN_FLIGHT_FRAMES);
+    
+    cx.command_buffers.resize(MAX_IN_FLIGHT_FRAMES);
 
     // get command buffer
-    VK_CHECK(vkAllocateCommandBuffers(device, &command_buffer_info,
-                                      command_buffers.data()),
+    VK_CHECK(vkAllocateCommandBuffers(cx.device, &command_buffer_info,
+                                      cx.command_buffers.data()),
              "failed to allocate command buffers");
 
-    deletion_stack.push([this]() {
-      vkFreeCommandBuffers(this->device, this->command_pool,
-                           this->command_buffers.size(),
-                           this->command_buffers.data());
+    cx.deletion_stack.push([this]() {
+      vkFreeCommandBuffers(this->cx.device, this->cx.command_pool, 1,
+                           this->cx.command_buffers.data());
     });
   }
 
-  void create_semaphores() {
+  void create_semaphores(Context& cx) {
     const VkSemaphoreCreateInfo unsignaled_semaphore_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
 
-    semaphores.swapchain_image_is_available.resize(MAX_IN_FLIGHT_FRAMES);
-    semaphores.rendering_is_complete.resize(MAX_IN_FLIGHT_FRAMES);
+    cx.semaphores.swapchain_image_is_available.resize(MAX_IN_FLIGHT_FRAMES);
+    cx.semaphores.rendering_is_complete.resize(MAX_IN_FLIGHT_FRAMES);
 
     for (int i = 0; i < MAX_IN_FLIGHT_FRAMES; i++) {
-      vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
-                        &semaphores.swapchain_image_is_available[i]);
+      vkCreateSemaphore(cx.device, &unsignaled_semaphore_info, nullptr,
+                        &cx.semaphores.swapchain_image_is_available[i]);
 
-      vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
-                        &semaphores.rendering_is_complete[i]);
+      vkCreateSemaphore(cx.device, &unsignaled_semaphore_info, nullptr,
+                        &cx.semaphores.rendering_is_complete[i]);
 
-      deletion_stack.push([i, this]() {
-        vkDestroySemaphore(device, semaphores.swapchain_image_is_available[i],
+      cx.deletion_stack.push([i, this]() {
+        vkDestroySemaphore(this->cx.device,
+                           this->cx.semaphores.swapchain_image_is_available[i],
                            nullptr);
-        vkDestroySemaphore(device, semaphores.rendering_is_complete[i],
+        vkDestroySemaphore(this->cx.device,
+                           this->cx.semaphores.rendering_is_complete[i],
                            nullptr);
       });
     }
   }
 
-  void create_fences() {
+  void create_fences(Context& cx) {
     const VkFenceCreateInfo signaled_fence_info = {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
         .flags = VK_FENCE_CREATE_SIGNALED_BIT,
@@ -941,85 +968,88 @@ class App {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
     };
 
-    fences.command_buffer_can_be_used.resize(MAX_IN_FLIGHT_FRAMES);
-    fences.rendering_is_complete.resize(MAX_IN_FLIGHT_FRAMES);
+    cx.fences.command_buffer_can_be_used.resize(MAX_IN_FLIGHT_FRAMES);
+    cx.fences.rendering_is_complete.resize(MAX_IN_FLIGHT_FRAMES);
 
     for (int i = 0; i < MAX_IN_FLIGHT_FRAMES; i++) {
-      vkCreateFence(device, &signaled_fence_info, nullptr,
-                    &fences.command_buffer_can_be_used[i]);
+      vkCreateFence(cx.device, &signaled_fence_info, nullptr,
+                    &cx.fences.command_buffer_can_be_used[i]);
 
-      vkCreateFence(device, &unsignaled_fence_info, nullptr,
-                    &fences.rendering_is_complete[i]);
+      vkCreateFence(cx.device, &unsignaled_fence_info, nullptr,
+                    &cx.fences.rendering_is_complete[i]);
 
-      deletion_stack.push([i, this]() {
-        vkDestroyFence(device, fences.rendering_is_complete[i], nullptr);
-        vkDestroyFence(device, fences.command_buffer_can_be_used[i], nullptr);
+      cx.deletion_stack.push([i, this]() {
+        vkDestroyFence(this->cx.device,
+                       this->cx.fences.rendering_is_complete[i], nullptr);
+        vkDestroyFence(this->cx.device,
+                       this->cx.fences.command_buffer_can_be_used[i], nullptr);
       });
     }
   }
 
-  void create_queue() {
-    QueueFamilyIndex queue_family_index = find_queue_family_index();
-    vkGetDeviceQueue(device, queue_family_index.draw_and_present_family.value(),
-                     0, &queue);
+  void create_queue(Context& cx) {
+    QueueFamilyIndex queue_family_index = find_queue_family_index(cx);
+    vkGetDeviceQueue(cx.device,
+                     queue_family_index.draw_and_present_family.value(), 0,
+                     &cx.queue);
   }
 
-  void teardown_framebuffers() {
+  void teardown_framebuffers(Context& cx) {
     // since in create swapchain the destroy swapchain is already enqueued
-    for (auto& swapchain_framebuffer : swapchain_framebuffers) {
-      vkDestroyFramebuffer(device, swapchain_framebuffer, nullptr);
+    for (auto& swapchain_framebuffer : cx.swapchain_framebuffers) {
+      vkDestroyFramebuffer(cx.device, swapchain_framebuffer, nullptr);
     }
   }
 
-  void teardown_swapchain_and_image_views() {
-    for (auto& swapchain_image_view : swapchain_image_views) {
-      vkDestroyImageView(device, swapchain_image_view, nullptr);
+  void teardown_swapchain_and_image_views(Context& cx) {
+    for (auto& swapchain_image_view : cx.swapchain_image_views) {
+      vkDestroyImageView(cx.device, swapchain_image_view, nullptr);
     }
 
-    vkDestroySwapchainKHR(device, swapchain, nullptr);
+    vkDestroySwapchainKHR(cx.device, cx.swapchain, nullptr);
   }
 
-  void recreate_swapchain() {
-    VK_CHECK(vkDeviceWaitIdle(device), "failed to wait for device");
+  void recreate_swapchain(Context& cx) {
+    VK_CHECK(vkDeviceWaitIdle(cx.device), "failed to wait for device");
 
-    teardown_framebuffers();
+    teardown_framebuffers(cx);
 
-    create_swapchain();
-    create_image_views();
-    create_framebuffers();
+    create_swapchain(cx);
+    create_image_views(cx);
+    create_framebuffers(cx);
   }
 
-  void create_pipeline() {
-    pipelines = pipeline_constructor.create(device, swapchain_image_extent,
-                                            render_pass);
-    deletion_stack.push([this]() {
-      for (auto& pipeline : this->pipelines) {
-        vkDestroyPipeline(device, pipeline, nullptr);
+  void create_pipeline(Context& cx) {
+    cx.pipelines = cx.pipeline_constructor.create(
+        cx.device, cx.swapchain_dimensions.extent, cx.render_pass);
+    cx.deletion_stack.push([this]() {
+      for (auto& pipeline : this->cx.pipelines) {
+        vkDestroyPipeline(this->cx.device, pipeline, nullptr);
       };
-      pipeline_constructor.deletion_stack.flush();
+      this->cx.pipeline_constructor.deletion_stack.flush();
     });
   }
 
-  void create_framebuffers() {
-    swapchain_framebuffers.resize(swapchain_image_views.size());
+  void create_framebuffers(Context& cx) {
+    cx.swapchain_framebuffers.resize(cx.swapchain_image_views.size());
 
-    for (size_t i = 0; i < swapchain_image_views.size(); i++) {
-      VkImageView attachments[] = {swapchain_image_views[i], depth_buffer_view};
+    for (size_t i = 0; i < cx.swapchain_image_views.size(); i++) {
+      VkImageView attachments[] = {cx.swapchain_image_views[i], cx.depth_b.image_view};
 
       VkFramebufferCreateInfo framebufferInfo{};
       framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-      framebufferInfo.renderPass = render_pass;
+      framebufferInfo.renderPass = cx.render_pass;
       framebufferInfo.attachmentCount = 2;
       framebufferInfo.pAttachments = attachments;
-      framebufferInfo.width = swapchain_image_extent.width;
-      framebufferInfo.height = swapchain_image_extent.height;
+      framebufferInfo.width = cx.swapchain_dimensions.extent.width;
+      framebufferInfo.height = cx.swapchain_dimensions.extent.height;
 
       // println("{}x{}", framebufferInfo.width, framebufferInfo.height);
 
       framebufferInfo.layers = 1;
 
-      if (vkCreateFramebuffer(device, &framebufferInfo, nullptr,
-                              &swapchain_framebuffers[i]) != VK_SUCCESS) {
+      if (vkCreateFramebuffer(cx.device, &framebufferInfo, nullptr,
+                              &cx.swapchain_framebuffers[i]) != VK_SUCCESS) {
         throw runtime_error("failed to create framebuffer!");
       }
     }
@@ -1028,68 +1058,68 @@ class App {
   void create_allocator() {
     // initialize the memory allocator
     VmaAllocatorCreateInfo allocatorInfo = {};
-    allocatorInfo.physicalDevice = physical_device;
-    allocatorInfo.device = device;
-    allocatorInfo.instance = instance;
+    allocatorInfo.physicalDevice = cx.physical_device;
+    allocatorInfo.device = cx.device;
+    allocatorInfo.instance = cx.instance;
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-    vmaCreateAllocator(&allocatorInfo, &_allocator);
-    deletion_stack.push([this]() { vmaDestroyAllocator(this->_allocator); });
+    vmaCreateAllocator(&allocatorInfo, &cx._allocator);
+    cx.deletion_stack.push([this]() { vmaDestroyAllocator(this->cx._allocator); });
   }
 
-  void init_vulkan() {
-    deletion_stack.init();
-    create_instance();
+  void init_vulkan(Context& cx) {
+    cx.deletion_stack.init();
+    create_instance(cx);
     setup_debug_messenger();
-    choose_physical_device();
-    create_surface();
+    choose_physical_device(cx);
+    create_surface(cx);
 
     // and the queue as well
-    create_logical_device();
+    create_logical_device(cx);
     create_allocator();
-    create_swapchain();
+    create_swapchain(cx);
 
-    create_depth_buffer();
-    create_render_pass();
+    create_depth_buffer(cx);
+    create_render_pass(cx);
 
     // needed in the render pass*
     // * assuming no dynamic rendering
-    create_image_views();
-    create_depth_buffer_view();
-    create_framebuffers();
-    create_pipeline();
+    create_image_views(cx);
+    create_depth_buffer_view(cx);
+    create_framebuffers(cx);
+    create_pipeline(cx);
 
     // can be created anytime after device is created
-    create_command_pool();
-    create_command_buffers();
+    create_command_pool(cx);
+    create_command_buffers(cx);
     // synchronization stuff
-    create_fences();
-    create_semaphores();
-    create_queue();
+    create_fences(cx);
+    create_semaphores(cx);
+    create_queue(cx);
     // dbg_get_surface_output_formats();
   }
-  void render_frame() {
+  void render_frame(Context& cx) {
     // println("-----------------{}----------------", total_frames_rendered);
-    vkWaitForFences(device, 1,
-                    &fences.command_buffer_can_be_used[current_frame], VK_TRUE,
+    vkWaitForFences(cx.device, 1,
+                    &cx.fences.command_buffer_can_be_used[cx.current_frame], VK_TRUE,
                     UINT64_MAX);
 
     VkAcquireNextImageInfoKHR next_image_info = {
         .sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
-        .swapchain = swapchain,
+        .swapchain = cx.swapchain,
         // wait 1 second maxinum
         .timeout = UINT64_MAX,
-        .semaphore = semaphores.swapchain_image_is_available[current_frame],
+        .semaphore = cx.semaphores.swapchain_image_is_available[cx.current_frame],
         .fence = VK_NULL_HANDLE,
-        .deviceMask = static_cast<u32>(1) << physical_device_index};
+        .deviceMask = static_cast<u32>(1) << cx.physical_device_index};
 
     u32 swapchain_image_index;
     VkResult acquire_next_image_result = vkAcquireNextImage2KHR(
-        device, &next_image_info, &swapchain_image_index);
+        cx.device, &next_image_info, &swapchain_image_index);
     if (acquire_next_image_result == VK_ERROR_OUT_OF_DATE_KHR ||
         acquire_next_image_result == VK_SUBOPTIMAL_KHR) {
       // delete the now invalid semaphore
-      vkDestroySemaphore(device,
-                         semaphores.swapchain_image_is_available[current_frame],
+      vkDestroySemaphore(cx.device,
+                         cx.semaphores.swapchain_image_is_available[cx.current_frame],
                          nullptr);
 
       const VkSemaphoreCreateInfo unsignaled_semaphore_info = {
@@ -1097,21 +1127,21 @@ class App {
       };
 
       vkCreateSemaphore(
-          device, &unsignaled_semaphore_info, nullptr,
-          &semaphores.swapchain_image_is_available[current_frame]);
+          cx.device, &unsignaled_semaphore_info, nullptr,
+          &cx.semaphores.swapchain_image_is_available[cx.current_frame]);
 
       // recreate the swapchain
       // println("recreating swapchain {}", current_frame);
-      recreate_swapchain();
+      recreate_swapchain(cx);
       return;
     } else if (acquire_next_image_result != VK_SUCCESS) {
       throw runtime_error("unable to acquire next image");
     }
 
-    vkResetFences(device, 1, &fences.command_buffer_can_be_used[current_frame]);
+    vkResetFences(cx.device, 1, &cx.fences.command_buffer_can_be_used[cx.current_frame]);
 
     // get command buffer
-    VkCommandBuffer command_buffer = command_buffers[current_frame];
+    VkCommandBuffer command_buffer = cx.command_buffers[cx.current_frame];
 
     const VkCommandBufferBeginInfo command_buffer_begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1131,9 +1161,9 @@ class App {
 
     const VkRenderPassBeginInfo renderpassInfo = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = render_pass,
-        .framebuffer = swapchain_framebuffers[swapchain_image_index],
-        .renderArea = {.offset = {0, 0}, .extent = swapchain_image_extent},
+        .renderPass = cx.render_pass,
+        .framebuffer = cx.swapchain_framebuffers[swapchain_image_index],
+        .renderArea = {.offset = {0, 0}, .extent = cx.swapchain_dimensions.extent},
         .clearValueCount = static_cast<u32>(clear_values.size()),
         .pClearValues = clear_values.data(),
     };
@@ -1141,19 +1171,19 @@ class App {
                          VK_SUBPASS_CONTENTS_INLINE);
 
     vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      pipelines[0]);
+                      cx.pipelines[0]);
 
     const VkViewport viewport = {
         .x = 0.0f,
         .y = 0.0f,
-        .width = static_cast<float>(swapchain_image_extent.width),
-        .height = static_cast<float>(swapchain_image_extent.height),
+        .width = static_cast<float>(cx.swapchain_dimensions.extent.width),
+        .height = static_cast<float>(cx.swapchain_dimensions.extent.height),
         .minDepth = 0.0f,
         .maxDepth = 1.0f};
     vkCmdSetViewport(command_buffer, 0, 1, &viewport);
     const VkRect2D scissor = {
         .offset = {0, 0},
-        .extent = swapchain_image_extent,
+        .extent = cx.swapchain_dimensions.extent,
     };
     vkCmdSetScissor(command_buffer, 0, 1, &scissor);
     vkCmdDraw(command_buffer, 3, 1, 0, 0);
@@ -1168,15 +1198,15 @@ class App {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
         .pWaitSemaphores =
-            &semaphores.swapchain_image_is_available[current_frame],
+            &cx.semaphores.swapchain_image_is_available[cx.current_frame],
         .pWaitDstStageMask = &wait_destination_stage_masks[0],
         .commandBufferCount = 1,
         .pCommandBuffers = &command_buffer,
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &semaphores.rendering_is_complete[current_frame]};
+        .pSignalSemaphores = &cx.semaphores.rendering_is_complete[cx.current_frame]};
 
-    VK_CHECK(vkQueueSubmit(queue, 1, &submit_info,
-                           fences.command_buffer_can_be_used[current_frame]),
+    VK_CHECK(vkQueueSubmit(cx.queue, 1, &submit_info,
+                           cx.fences.command_buffer_can_be_used[cx.current_frame]),
              "failed to submit queue");
     ;
 
@@ -1184,19 +1214,19 @@ class App {
     const VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &semaphores.rendering_is_complete[current_frame],
+        .pWaitSemaphores = &cx.semaphores.rendering_is_complete[cx.current_frame],
         .swapchainCount = 1,
-        .pSwapchains = &swapchain,
+        .pSwapchains = &cx.swapchain,
         .pImageIndices = &swapchain_image_index,
         .pResults = &present_result};
-    vkQueuePresentKHR(queue, &present_info);
-    current_frame = (current_frame + 1) % MAX_IN_FLIGHT_FRAMES;
+    vkQueuePresentKHR(cx.queue, &present_info);
+    cx.current_frame = (cx.current_frame + 1) % MAX_IN_FLIGHT_FRAMES;
   }
   void main_loop() {
     while (!glfwWindowShouldClose(window)) {
       glfwPollEvents();
 
-      render_frame();
+      render_frame(cx);
 
       // VK_CHECK(present_result, "failed to present");
       total_frames_rendered += 1;
@@ -1206,22 +1236,22 @@ class App {
       // }
     }
   }
-  void destroy_debug_messenger() {
+  void destroy_debug_messenger(Context& cx) {
     if (!enableValidationLayers) {
       return;
     }
     // debug messenger must exist
-    DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nullptr);
+    DestroyDebugUtilsMessengerEXT(cx.instance, cx.debug_messenger, nullptr);
   }
   void teardown() {
-    println("------------------begin cleanup---------------------");
+    // println("------------------begin cleanup---------------------");
     // wait until last semaphore/fence runs
-    vkDeviceWaitIdle(device);
+    vkDeviceWaitIdle(cx.device);
     // since the swapchain is created and destroyed potentially many times
     // at game time, it needs to be manually tracked.
-    teardown_framebuffers();
-    teardown_swapchain_and_image_views();
-    deletion_stack.flush();
+    teardown_framebuffers(cx);
+    teardown_swapchain_and_image_views(cx);
+    cx.deletion_stack.flush();
 
     glfwDestroyWindow(window);
     glfwTerminate();
