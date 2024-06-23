@@ -159,15 +159,39 @@ class App {
   Context cx;
 
   void run() {
-    init_window();
+    init_window(cx);
     init_vulkan(cx);
     main_loop();
     teardown();
   }
 
  private:
-  void init_window() {
-    glfwInit();
+  static void framebuffer_size_callback(GLFWwindow* window,
+                                        int new_width,
+                                        int new_height) {
+    auto app_instance = static_cast<App*>(glfwGetWindowUserPointer(window));
+    app_instance->framebuffer_width = new_width;
+    app_instance->framebuffer_height = new_height;
+  }
+
+  static void window_size_callback(GLFWwindow* window,
+                                   int new_width,
+                                   int new_height) {
+    auto app_instance = static_cast<App*>(glfwGetWindowUserPointer(window));
+    app_instance->window_width = new_width;
+    app_instance->window_height = new_height;
+  }
+
+  void initialize_event_listeners(Context& cx) {
+    glfwSetWindowUserPointer(window, this);
+    glfwSetWindowSizeCallback(window, window_size_callback);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+  }
+
+  void init_window(Context& cx) {
+    if (!glfwInit()) {
+      throw runtime_error("failed to initialize glfw!");
+    };
 
     // disable opengl context
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -175,6 +199,8 @@ class App {
 
     glfwGetWindowSize(window, &window_width, &window_height);
     glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
+
+    initialize_event_listeners(cx);
   }
 
   // All messenger functions must have the signature
@@ -754,10 +780,10 @@ class App {
       cerr << "error creating depth image" << endl;
     };
 
-    cx.deletion_stack.push([this]() {
-      vmaDestroyImage(this->cx._allocator, this->cx.depth_b.image,
-                      this->cx.depth_b.allocation);
-    });
+    // cx.deletion_stack.push([this]() {
+    //   vmaDestroyImage(this->cx._allocator, this->cx.depth_b.image,
+    //                   this->cx.depth_b.allocation);
+    // });
   }
 
   void create_render_pass(Context& cx) {
@@ -876,9 +902,10 @@ class App {
   void create_depth_buffer_view(Context& cx) {
     cx.depth_b.image_view = create_image_view(
         cx.depth_b.image, cx.depth_b.format, VK_IMAGE_ASPECT_DEPTH_BIT);
-    cx.deletion_stack.push([this]() {
-      vkDestroyImageView(this->cx.device, this->cx.depth_b.image_view, nullptr);
-    });
+    // cx.deletion_stack.push([this]() {
+    //   vkDestroyImageView(this->cx.device, this->cx.depth_b.image_view,
+    //   nullptr);
+    // });
   }
 
   // image views used at runtime during pipeline rendering
@@ -919,7 +946,7 @@ class App {
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = MAX_IN_FLIGHT_FRAMES,
     };
-    
+
     cx.command_buffers.resize(MAX_IN_FLIGHT_FRAMES);
 
     // get command buffer
@@ -1000,6 +1027,12 @@ class App {
       vkDestroyFramebuffer(cx.device, swapchain_framebuffer, nullptr);
     }
   }
+  
+  void teardown_depth_buffer(Context& cx) {
+    // cleanup depth image and depth image view
+    vkDestroyImageView(cx.device, cx.depth_b.image_view, nullptr);
+    vmaDestroyImage(cx._allocator, cx.depth_b.image, cx.depth_b.allocation);
+  }
 
   void teardown_swapchain_and_image_views(Context& cx) {
     for (auto& swapchain_image_view : cx.swapchain_image_views) {
@@ -1013,9 +1046,14 @@ class App {
     VK_CHECK(vkDeviceWaitIdle(cx.device), "failed to wait for device");
 
     teardown_framebuffers(cx);
+    teardown_depth_buffer(cx);
 
     create_swapchain(cx);
+    create_depth_buffer(cx);
+    
     create_image_views(cx);
+    create_depth_buffer_view(cx);
+    
     create_framebuffers(cx);
   }
 
@@ -1034,7 +1072,8 @@ class App {
     cx.swapchain_framebuffers.resize(cx.swapchain_image_views.size());
 
     for (size_t i = 0; i < cx.swapchain_image_views.size(); i++) {
-      VkImageView attachments[] = {cx.swapchain_image_views[i], cx.depth_b.image_view};
+      VkImageView attachments[] = {cx.swapchain_image_views[i],
+                                   cx.depth_b.image_view};
 
       VkFramebufferCreateInfo framebufferInfo{};
       framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -1063,7 +1102,8 @@ class App {
     allocatorInfo.instance = cx.instance;
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
     vmaCreateAllocator(&allocatorInfo, &cx._allocator);
-    cx.deletion_stack.push([this]() { vmaDestroyAllocator(this->cx._allocator); });
+    cx.deletion_stack.push(
+        [this]() { vmaDestroyAllocator(this->cx._allocator); });
   }
 
   void init_vulkan(Context& cx) {
@@ -1100,15 +1140,16 @@ class App {
   void render_frame(Context& cx) {
     // println("-----------------{}----------------", total_frames_rendered);
     vkWaitForFences(cx.device, 1,
-                    &cx.fences.command_buffer_can_be_used[cx.current_frame], VK_TRUE,
-                    UINT64_MAX);
+                    &cx.fences.command_buffer_can_be_used[cx.current_frame],
+                    VK_TRUE, UINT64_MAX);
 
     VkAcquireNextImageInfoKHR next_image_info = {
         .sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
         .swapchain = cx.swapchain,
         // wait 1 second maxinum
         .timeout = UINT64_MAX,
-        .semaphore = cx.semaphores.swapchain_image_is_available[cx.current_frame],
+        .semaphore =
+            cx.semaphores.swapchain_image_is_available[cx.current_frame],
         .fence = VK_NULL_HANDLE,
         .deviceMask = static_cast<u32>(1) << cx.physical_device_index};
 
@@ -1118,9 +1159,10 @@ class App {
     if (acquire_next_image_result == VK_ERROR_OUT_OF_DATE_KHR ||
         acquire_next_image_result == VK_SUBOPTIMAL_KHR) {
       // delete the now invalid semaphore
-      vkDestroySemaphore(cx.device,
-                         cx.semaphores.swapchain_image_is_available[cx.current_frame],
-                         nullptr);
+      vkDestroySemaphore(
+          cx.device,
+          cx.semaphores.swapchain_image_is_available[cx.current_frame],
+          nullptr);
 
       const VkSemaphoreCreateInfo unsignaled_semaphore_info = {
           .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
@@ -1138,7 +1180,8 @@ class App {
       throw runtime_error("unable to acquire next image");
     }
 
-    vkResetFences(cx.device, 1, &cx.fences.command_buffer_can_be_used[cx.current_frame]);
+    vkResetFences(cx.device, 1,
+                  &cx.fences.command_buffer_can_be_used[cx.current_frame]);
 
     // get command buffer
     VkCommandBuffer command_buffer = cx.command_buffers[cx.current_frame];
@@ -1163,7 +1206,8 @@ class App {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
         .renderPass = cx.render_pass,
         .framebuffer = cx.swapchain_framebuffers[swapchain_image_index],
-        .renderArea = {.offset = {0, 0}, .extent = cx.swapchain_dimensions.extent},
+        .renderArea = {.offset = {0, 0},
+                       .extent = cx.swapchain_dimensions.extent},
         .clearValueCount = static_cast<u32>(clear_values.size()),
         .pClearValues = clear_values.data(),
     };
@@ -1203,18 +1247,21 @@ class App {
         .commandBufferCount = 1,
         .pCommandBuffers = &command_buffer,
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &cx.semaphores.rendering_is_complete[cx.current_frame]};
+        .pSignalSemaphores =
+            &cx.semaphores.rendering_is_complete[cx.current_frame]};
 
-    VK_CHECK(vkQueueSubmit(cx.queue, 1, &submit_info,
-                           cx.fences.command_buffer_can_be_used[cx.current_frame]),
-             "failed to submit queue");
+    VK_CHECK(
+        vkQueueSubmit(cx.queue, 1, &submit_info,
+                      cx.fences.command_buffer_can_be_used[cx.current_frame]),
+        "failed to submit queue");
     ;
 
     VkResult present_result;
     const VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &cx.semaphores.rendering_is_complete[cx.current_frame],
+        .pWaitSemaphores =
+            &cx.semaphores.rendering_is_complete[cx.current_frame],
         .swapchainCount = 1,
         .pSwapchains = &cx.swapchain,
         .pImageIndices = &swapchain_image_index,
@@ -1251,6 +1298,8 @@ class App {
     // at game time, it needs to be manually tracked.
     teardown_framebuffers(cx);
     teardown_swapchain_and_image_views(cx);
+    teardown_depth_buffer(cx);
+      
     cx.deletion_stack.flush();
 
     glfwDestroyWindow(window);
