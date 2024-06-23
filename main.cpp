@@ -46,6 +46,7 @@ using namespace fmt;
 using namespace filesystem;
 
 #define u32 uint32_t
+#define u64 uint64_t
 
 const u32 WIDTH = 800;
 const u32 HEIGHT = 600;
@@ -68,13 +69,13 @@ struct DepthImage {
 };
 
 struct Semaphores {
-  VkSemaphore swapchain_image_is_available;
-  VkSemaphore rendering_is_complete;
+  vector<VkSemaphore> swapchain_image_is_available;
+  vector<VkSemaphore> rendering_is_complete;
 };
 
 struct Fences {
-  VkFence command_buffer_can_be_used;
-  VkFence rendering_is_complete;
+  vector<VkFence> command_buffer_can_be_used;
+  vector<VkFence> rendering_is_complete;
 };
 
 void VK_CHECK_CONDITIONAL(VkResult result,
@@ -101,6 +102,8 @@ void VK_CHECK(VkResult result, string err) {
   }
 }
 
+const u32 MAX_IN_FLIGHT_FRAMES = 2;
+
 class App {
  public:
   GLFWwindow* window;
@@ -112,7 +115,7 @@ class App {
   VkSurfaceKHR surface;
   VkDevice device;
   VkRenderPass render_pass;
-  VkSwapchainKHR swapchain;
+  VkSwapchainKHR swapchain = VK_NULL_HANDLE;
   vector<VkImage> swapchain_images;
   vector<VkImageView> swapchain_image_views;
   VkFormat swapchain_image_format;
@@ -130,16 +133,19 @@ class App {
   VkCommandPool command_pool;
   Semaphores semaphores;
   Fences fences;
-  u32 frame_count = 0;
+  u32 total_frames_rendered = 0;
+  u32 current_frame = 0;
 
   int window_width;
   int window_height;
+  int framebuffer_width;
+  int framebuffer_height;
 
   void run() {
     init_window();
     init_vulkan();
     main_loop();
-    cleanup();
+    teardown();
   }
 
  private:
@@ -151,6 +157,7 @@ class App {
     window = glfwCreateWindow(WIDTH, HEIGHT, "Vulkan Window", nullptr, nullptr);
 
     glfwGetWindowSize(window, &window_width, &window_height);
+    glfwGetFramebufferSize(window, &framebuffer_width, &framebuffer_height);
   }
 
   // All messenger functions must have the signature
@@ -593,7 +600,6 @@ class App {
 
   SwapChainSupportDetails get_swapchain_support() {
     SwapChainSupportDetails swapchain_support_details;
-
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         physical_device, surface, &swapchain_support_details.capabilities);
 
@@ -616,6 +622,7 @@ class App {
     return swapchain_support_details;
   }
 
+  // creates a swapchain, from an old one, if possible
   void create_swapchain() {
     // query formats supported by surface
     SwapChainSupportDetails swapchain_support_details = get_swapchain_support();
@@ -633,21 +640,28 @@ class App {
       }
     }
 
+    if (!format_valid) {
+      // cout << get_swapchain_support() << endl;
+      throw runtime_error("swapchain doesn't have supported formats");
+    }
+
     u32 min_image_count =
         swapchain_support_details.capabilities.maxImageCount == 0
             ? swapchain_support_details.capabilities.minImageCount + 1
             : min(swapchain_support_details.capabilities.minImageCount + 1,
                   swapchain_support_details.capabilities.maxImageCount);
 
-    if (!format_valid) {
-      // cout << get_swapchain_support() << endl;
-      throw runtime_error("swapchain doesn't have supported formats");
-    }
+    // account for high-dpi scaling of some systems:
+    // the surface resolution may be greater or lower than the window
+    // dimensions. Only the framebuffer matches up.
 
-    swapchain_image_extent = {.width = static_cast<u32>(window_width),
-                              .height = static_cast<u32>(window_height)};
+    swapchain_image_extent = {.width = static_cast<u32>(framebuffer_width),
+                              .height = static_cast<u32>(framebuffer_height)};
+    // println("dbg: {}x{}", window_width, window_height);
 
     QueueFamilyIndex index = find_queue_family_index();
+
+    VkSwapchainKHR old_swapchain = swapchain;
 
     VkSwapchainCreateInfoKHR swapchain_create_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -664,15 +678,22 @@ class App {
         // .pQueueFamilyIndices = nullptr,
         .preTransform = swapchain_support_details.capabilities.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-        .clipped = VK_TRUE};
+        .clipped = VK_TRUE,
+        .oldSwapchain = old_swapchain};
 
-    if (vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr,
-                             &swapchain) != VK_SUCCESS) {
-      throw runtime_error("failed to create swapchain");
+    VK_CHECK(vkCreateSwapchainKHR(device, &swapchain_create_info, nullptr,
+                                  &swapchain),
+             "failed to create swapchain");
+
+    // after new swapchain is created, all resources can be freed
+    // related to the old swapchain
+    if (old_swapchain != VK_NULL_HANDLE) {
+      for (auto& swapchain_image_view : swapchain_image_views) {
+        vkDestroyImageView(device, swapchain_image_view, nullptr);
+      }
+
+      vkDestroySwapchainKHR(device, old_swapchain, nullptr);
     }
-    deletion_stack.push([this]() {
-      vkDestroySwapchainKHR(this->device, this->swapchain, nullptr);
-    });
 
     u32 image_count;
     vkGetSwapchainImagesKHR(device, swapchain, &image_count, nullptr);
@@ -689,8 +710,8 @@ class App {
         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = VK_IMAGE_TYPE_2D,
         .format = depth_buffer_format,
-        .extent = {.width = static_cast<u32>(window_width),
-                   .height = static_cast<u32>(window_height),
+        .extent = {.width = static_cast<u32>(framebuffer_width),
+                   .height = static_cast<u32>(framebuffer_height),
                    .depth = static_cast<u32>(1)},
         .mipLevels = 1,
         .arrayLayers = 1,
@@ -825,8 +846,6 @@ class App {
         VK_SUCCESS) {
       throw runtime_error("failed to create image view!");
     }
-    deletion_stack.push(
-        [=, this]() { vkDestroyImageView(this->device, image_view, nullptr); });
 
     return image_view;
   }
@@ -834,6 +853,8 @@ class App {
   void create_depth_buffer_view() {
     depth_buffer_view = create_image_view(
         depth_image.image, depth_buffer_format, VK_IMAGE_ASPECT_DEPTH_BIT);
+    deletion_stack.push(
+        [this]() { vkDestroyImageView(device, depth_buffer_view, nullptr); });
   }
 
   // image views used at runtime during pipeline rendering
@@ -871,41 +892,44 @@ class App {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
         .commandPool = command_pool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
+        .commandBufferCount = MAX_IN_FLIGHT_FRAMES,
     };
-    command_buffers.push_back(VK_NULL_HANDLE);
+    command_buffers.resize(MAX_IN_FLIGHT_FRAMES);
+
     // get command buffer
-    if (vkAllocateCommandBuffers(device, &command_buffer_info,
-                                 command_buffers.data()) != VK_SUCCESS) {
-      throw runtime_error("failed to allocate command buffer");
-    }
+    VK_CHECK(vkAllocateCommandBuffers(device, &command_buffer_info,
+                                      command_buffers.data()),
+             "failed to allocate command buffers");
 
     deletion_stack.push([this]() {
-      vkFreeCommandBuffers(this->device, this->command_pool, 1,
+      vkFreeCommandBuffers(this->device, this->command_pool,
+                           this->command_buffers.size(),
                            this->command_buffers.data());
     });
   }
 
   void create_semaphores() {
-    const VkSemaphoreCreateInfo signaled_semaphore_info = {
-        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-        .flags = VK_FENCE_CREATE_SIGNALED_BIT,
-    };
     const VkSemaphoreCreateInfo unsignaled_semaphore_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
     };
 
-    vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
-                      &semaphores.swapchain_image_is_available);
+    semaphores.swapchain_image_is_available.resize(MAX_IN_FLIGHT_FRAMES);
+    semaphores.rendering_is_complete.resize(MAX_IN_FLIGHT_FRAMES);
 
-    vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
-                      &semaphores.rendering_is_complete);
+    for (int i = 0; i < MAX_IN_FLIGHT_FRAMES; i++) {
+      vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
+                        &semaphores.swapchain_image_is_available[i]);
 
-    deletion_stack.push([this]() {
-      vkDestroySemaphore(device, semaphores.swapchain_image_is_available,
-                         nullptr);
-      vkDestroySemaphore(device, semaphores.rendering_is_complete, nullptr);
-    });
+      vkCreateSemaphore(device, &unsignaled_semaphore_info, nullptr,
+                        &semaphores.rendering_is_complete[i]);
+
+      deletion_stack.push([i, this]() {
+        vkDestroySemaphore(device, semaphores.swapchain_image_is_available[i],
+                           nullptr);
+        vkDestroySemaphore(device, semaphores.rendering_is_complete[i],
+                           nullptr);
+      });
+    }
   }
 
   void create_fences() {
@@ -917,22 +941,52 @@ class App {
         .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
     };
 
-    vkCreateFence(device, &signaled_fence_info, nullptr,
-                  &fences.command_buffer_can_be_used);
+    fences.command_buffer_can_be_used.resize(MAX_IN_FLIGHT_FRAMES);
+    fences.rendering_is_complete.resize(MAX_IN_FLIGHT_FRAMES);
 
-    vkCreateFence(device, &unsignaled_fence_info, nullptr,
-                  &fences.rendering_is_complete);
+    for (int i = 0; i < MAX_IN_FLIGHT_FRAMES; i++) {
+      vkCreateFence(device, &signaled_fence_info, nullptr,
+                    &fences.command_buffer_can_be_used[i]);
 
-    deletion_stack.push([this]() {
-      vkDestroyFence(device, fences.rendering_is_complete, nullptr);
-      vkDestroyFence(device, fences.command_buffer_can_be_used, nullptr);
-    });
+      vkCreateFence(device, &unsignaled_fence_info, nullptr,
+                    &fences.rendering_is_complete[i]);
+
+      deletion_stack.push([i, this]() {
+        vkDestroyFence(device, fences.rendering_is_complete[i], nullptr);
+        vkDestroyFence(device, fences.command_buffer_can_be_used[i], nullptr);
+      });
+    }
   }
 
   void create_queue() {
     QueueFamilyIndex queue_family_index = find_queue_family_index();
     vkGetDeviceQueue(device, queue_family_index.draw_and_present_family.value(),
                      0, &queue);
+  }
+
+  void teardown_framebuffers() {
+    // since in create swapchain the destroy swapchain is already enqueued
+    for (auto& swapchain_framebuffer : swapchain_framebuffers) {
+      vkDestroyFramebuffer(device, swapchain_framebuffer, nullptr);
+    }
+  }
+
+  void teardown_swapchain_and_image_views() {
+    for (auto& swapchain_image_view : swapchain_image_views) {
+      vkDestroyImageView(device, swapchain_image_view, nullptr);
+    }
+
+    vkDestroySwapchainKHR(device, swapchain, nullptr);
+  }
+
+  void recreate_swapchain() {
+    VK_CHECK(vkDeviceWaitIdle(device), "failed to wait for device");
+
+    teardown_framebuffers();
+
+    create_swapchain();
+    create_image_views();
+    create_framebuffers();
   }
 
   void create_pipeline() {
@@ -966,11 +1020,8 @@ class App {
 
       if (vkCreateFramebuffer(device, &framebufferInfo, nullptr,
                               &swapchain_framebuffers[i]) != VK_SUCCESS) {
-        throw std::runtime_error("failed to create framebuffer!");
+        throw runtime_error("failed to create framebuffer!");
       }
-      deletion_stack.push([=, this]() {
-        vkDestroyFramebuffer(device, swapchain_framebuffers[i], nullptr);
-      });
     }
   }
 
@@ -1016,111 +1067,143 @@ class App {
     create_queue();
     // dbg_get_surface_output_formats();
   }
+  void render_frame() {
+    // println("-----------------{}----------------", total_frames_rendered);
+    vkWaitForFences(device, 1,
+                    &fences.command_buffer_can_be_used[current_frame], VK_TRUE,
+                    UINT64_MAX);
+
+    VkAcquireNextImageInfoKHR next_image_info = {
+        .sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
+        .swapchain = swapchain,
+        // wait 1 second maxinum
+        .timeout = UINT64_MAX,
+        .semaphore = semaphores.swapchain_image_is_available[current_frame],
+        .fence = VK_NULL_HANDLE,
+        .deviceMask = static_cast<u32>(1) << physical_device_index};
+
+    u32 swapchain_image_index;
+    VkResult acquire_next_image_result = vkAcquireNextImage2KHR(
+        device, &next_image_info, &swapchain_image_index);
+    if (acquire_next_image_result == VK_ERROR_OUT_OF_DATE_KHR ||
+        acquire_next_image_result == VK_SUBOPTIMAL_KHR) {
+      // delete the now invalid semaphore
+      vkDestroySemaphore(device,
+                         semaphores.swapchain_image_is_available[current_frame],
+                         nullptr);
+
+      const VkSemaphoreCreateInfo unsignaled_semaphore_info = {
+          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      };
+
+      vkCreateSemaphore(
+          device, &unsignaled_semaphore_info, nullptr,
+          &semaphores.swapchain_image_is_available[current_frame]);
+
+      // recreate the swapchain
+      // println("recreating swapchain {}", current_frame);
+      recreate_swapchain();
+      return;
+    } else if (acquire_next_image_result != VK_SUCCESS) {
+      throw runtime_error("unable to acquire next image");
+    }
+
+    vkResetFences(device, 1, &fences.command_buffer_can_be_used[current_frame]);
+
+    // get command buffer
+    VkCommandBuffer command_buffer = command_buffers[current_frame];
+
+    const VkCommandBufferBeginInfo command_buffer_begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        // .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+
+    vkResetCommandBuffer(command_buffer, 0);
+
+    vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info);
+
+    // THIS IS WHERE THE MAGIC HAPPENS !!
+    // Begin Render Pass
+    const vector<VkClearValue> clear_values = {
+        {.color = {0.0f, 0.0f, 0.0f, 0.0f}},
+        {.depthStencil = {0., 0}},
+    };
+
+    const VkRenderPassBeginInfo renderpassInfo = {
+        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        .renderPass = render_pass,
+        .framebuffer = swapchain_framebuffers[swapchain_image_index],
+        .renderArea = {.offset = {0, 0}, .extent = swapchain_image_extent},
+        .clearValueCount = static_cast<u32>(clear_values.size()),
+        .pClearValues = clear_values.data(),
+    };
+    vkCmdBeginRenderPass(command_buffer, &renderpassInfo,
+                         VK_SUBPASS_CONTENTS_INLINE);
+
+    vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                      pipelines[0]);
+
+    const VkViewport viewport = {
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = static_cast<float>(swapchain_image_extent.width),
+        .height = static_cast<float>(swapchain_image_extent.height),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f};
+    vkCmdSetViewport(command_buffer, 0, 1, &viewport);
+    const VkRect2D scissor = {
+        .offset = {0, 0},
+        .extent = swapchain_image_extent,
+    };
+    vkCmdSetScissor(command_buffer, 0, 1, &scissor);
+    vkCmdDraw(command_buffer, 3, 1, 0, 0);
+    vkCmdEndRenderPass(command_buffer);
+    VK_CHECK(vkEndCommandBuffer(command_buffer),
+             "failed to end command buffer");
+
+    const VkPipelineStageFlags wait_destination_stage_masks[] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+
+    const VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores =
+            &semaphores.swapchain_image_is_available[current_frame],
+        .pWaitDstStageMask = &wait_destination_stage_masks[0],
+        .commandBufferCount = 1,
+        .pCommandBuffers = &command_buffer,
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &semaphores.rendering_is_complete[current_frame]};
+
+    VK_CHECK(vkQueueSubmit(queue, 1, &submit_info,
+                           fences.command_buffer_can_be_used[current_frame]),
+             "failed to submit queue");
+    ;
+
+    VkResult present_result;
+    const VkPresentInfoKHR present_info = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &semaphores.rendering_is_complete[current_frame],
+        .swapchainCount = 1,
+        .pSwapchains = &swapchain,
+        .pImageIndices = &swapchain_image_index,
+        .pResults = &present_result};
+    vkQueuePresentKHR(queue, &present_info);
+    current_frame = (current_frame + 1) % MAX_IN_FLIGHT_FRAMES;
+  }
   void main_loop() {
     while (!glfwWindowShouldClose(window)) {
       glfwPollEvents();
 
-      // println("{}", frame_count);
+      render_frame();
 
-      // get command buffer
-      VkCommandBuffer command_buffer = command_buffers[0];
-
-      vkWaitForFences(device, 1, &fences.command_buffer_can_be_used, VK_TRUE,
-                      UINT64_MAX);
-      vkResetFences(device, 1, &fences.command_buffer_can_be_used);
-
-      vkResetCommandBuffer(command_buffer, 0);
-
-      const VkCommandBufferBeginInfo command_buffer_begin_info = {
-          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-          // .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-      };
-
-      VkAcquireNextImageInfoKHR next_image_info = {
-          .sType = VK_STRUCTURE_TYPE_ACQUIRE_NEXT_IMAGE_INFO_KHR,
-          .swapchain = swapchain,
-          // wait 1 second maxinum
-          .timeout = UINT64_MAX,
-          .semaphore = semaphores.swapchain_image_is_available,
-          .fence = VK_NULL_HANDLE,
-          .deviceMask = static_cast<u32>(1) << physical_device_index};
-
-      u32 swapchain_image_index;
-      VK_CHECK_CONDITIONAL(vkAcquireNextImage2KHR(device, &next_image_info,
-                                                  &swapchain_image_index),
-                           "unable to acquire next image", {VK_SUBOPTIMAL_KHR});
-
-      vkBeginCommandBuffer(command_buffer, &command_buffer_begin_info);
-
-      // THIS IS WHERE THE MAGIC HAPPENS !!
-      // Begin Render Pass
-      const vector<VkClearValue> clear_values = {
-          {.color = {0.0f, 0.0f, 0.0f, 0.0f}},
-          {.depthStencil = {0., 0}},
-      };
-
-      const VkRenderPassBeginInfo renderpassInfo = {
-          .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-          .renderPass = render_pass,
-          .framebuffer = swapchain_framebuffers[swapchain_image_index],
-          .renderArea = {.offset = {0, 0}, .extent = swapchain_image_extent},
-          .clearValueCount = static_cast<u32>(clear_values.size()),
-          .pClearValues = clear_values.data(),
-      };
-      vkCmdBeginRenderPass(command_buffer, &renderpassInfo,
-                           VK_SUBPASS_CONTENTS_INLINE);
-
-      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        pipelines[0]);
-
-      const VkViewport viewport = {
-          .x = 0.0f,
-          .y = 0.0f,
-          .width = static_cast<float>(swapchain_image_extent.width),
-          .height = static_cast<float>(swapchain_image_extent.height),
-          .minDepth = 0.0f,
-          .maxDepth = 1.0f};
-      vkCmdSetViewport(command_buffer, 0, 1, &viewport);
-      const VkRect2D scissor = {
-          .offset = {0, 0},
-          .extent = swapchain_image_extent,
-      };
-      vkCmdSetScissor(command_buffer, 0, 1, &scissor);
-      vkCmdDraw(command_buffer, 3, 1, 0, 0);
-      vkCmdEndRenderPass(command_buffer);
-      VK_CHECK(vkEndCommandBuffer(command_buffer),
-               "failed to end command buffer");
-
-      const VkPipelineStageFlags wait_destination_stage_masks[] = {
-          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-
-      const VkSubmitInfo submit_info = {
-          .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-          .waitSemaphoreCount = 1,
-          .pWaitSemaphores = &semaphores.swapchain_image_is_available,
-          .pWaitDstStageMask = &wait_destination_stage_masks[0],
-          .commandBufferCount = 1,
-          .pCommandBuffers = &command_buffer,
-          .signalSemaphoreCount = 1,
-          .pSignalSemaphores = &semaphores.rendering_is_complete};
-
-      VK_CHECK(vkQueueSubmit(queue, 1, &submit_info,
-                             fences.command_buffer_can_be_used),
-               "failed to submit queue");
-      ;
-
-      VkResult present_result;
-      const VkPresentInfoKHR present_info = {
-          .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-          .waitSemaphoreCount = 1,
-          .pWaitSemaphores = &semaphores.rendering_is_complete,
-          .swapchainCount = 1,
-          .pSwapchains = &swapchain,
-          .pImageIndices = &swapchain_image_index,
-          .pResults = &present_result};
-      vkQueuePresentKHR(queue, &present_info);
       // VK_CHECK(present_result, "failed to present");
-      frame_count += 1;
+      total_frames_rendered += 1;
+      // DEBUG
+      // if (total_frames_rendered > 3) {
+      //   return;
+      // }
     }
   }
   void destroy_debug_messenger() {
@@ -1130,11 +1213,14 @@ class App {
     // debug messenger must exist
     DestroyDebugUtilsMessengerEXT(instance, debug_messenger, nullptr);
   }
-  void cleanup() {
-    // wait until last semaphore runs
-    vkWaitForFences(device, 1, &fences.command_buffer_can_be_used, VK_TRUE,
-                    UINT64_MAX);
-
+  void teardown() {
+    println("------------------begin cleanup---------------------");
+    // wait until last semaphore/fence runs
+    vkDeviceWaitIdle(device);
+    // since the swapchain is created and destroyed potentially many times
+    // at game time, it needs to be manually tracked.
+    teardown_framebuffers();
+    teardown_swapchain_and_image_views();
     deletion_stack.flush();
 
     glfwDestroyWindow(window);
