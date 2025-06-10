@@ -6,3 +6,5 @@
 
 /.vs
 /vcpkg_installed
+
+.DS_Store
